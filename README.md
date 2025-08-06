@@ -10,7 +10,7 @@ I am willmil11, a 15 year old french self taught dev.
 I've discovered C arround 3 months ago, since then I've toyed with it a lot, made a small os and stuff and I loved it, so I tought about cleanai and decided to remake it but in C :)
 
 ## How long have you been working on this?
-I've been working on the <a href="https://github.com/willmil11/cleanai>original cleanai repo</a> since a very long time, however I've only been working on this one since 2 weeks or so.
+I've been working on the <a href="https://github.com/willmil11/cleanai">original cleanai repo</a> since a very long time, however I've only been working on this one since 2 weeks or so.
 
 ## How to use?
 I will add a guide link here very soon. You can already compile the code with
