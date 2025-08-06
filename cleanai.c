@@ -1,0 +1,1462 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <stdbool.h>
+#include <time.h>
+#include <string.h>
+#include <ctype.h>
+#include <math.h>
+
+#include "cJSON.h"
+#include "cJSON.c"
+
+#ifdef _WIN32 //windows compability is pain ;(
+#include <windows.h>
+#include <conio.h>
+
+long long time_ms() {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER uli;
+    uli.LowPart = ft.dwLowDateTime;
+    uli.HighPart = ft.dwHighDateTime;
+    return (long long)(uli.QuadPart / 10000);
+}
+
+char* input_with_timeout(char* qry, int timeout_ms) {
+    printf("%s", qry);
+    fflush(stdout);
+    
+    char* buff = malloc(4096);
+    if (!buff) {
+        printf("Failed to allocate memory to read input.\n");
+        return NULL;
+    }
+    
+    int pos = 0;
+    long long start_time = time_ms();
+    
+    while (pos < 4095) {
+        if (_kbhit()) {
+            char c = _getch();
+            
+            if (c == '\r' || c == '\n') {
+                putchar('\n');
+                buff[pos] = '\0';
+                return buff;
+            } else if (c == '\b' && pos > 0) {
+                printf("\b \b");
+                pos--;
+            } else if (c >= 32 && c <= 126) {
+                putchar(c);
+                buff[pos++] = c;
+            }
+        }
+        
+        if (time_ms() - start_time >= timeout_ms) {
+            free(buff);
+            return NULL;
+        }
+        
+        Sleep(1);
+    }
+    
+    buff[pos] = '\0';
+    return buff;
+}
+
+#else
+#include <sys/time.h>
+#include <sys/select.h>
+#include <unistd.h>
+
+long long time_ms() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)(tv.tv_sec) * 1000 + (tv.tv_usec / 1000);
+}
+
+char* input_with_timeout(char* qry, int timeout_ms) {
+    printf("%s", qry);
+    fflush(stdout);
+    
+    char* buff = malloc(4096);
+    if (!buff) {
+        printf("Failed to allocate memory to read input.\n");
+        return NULL;
+    }
+    
+    fd_set readfds;
+    struct timeval tv;
+    long long start_time = time_ms();
+    
+    while (1) {
+        FD_ZERO(&readfds);
+        FD_SET(STDIN_FILENO, &readfds);
+        
+        long long elapsed = time_ms() - start_time;
+        if (elapsed >= timeout_ms) {
+            break;
+        }
+        
+        long long remaining = timeout_ms - elapsed;
+        tv.tv_sec = remaining / 1000;
+        tv.tv_usec = (remaining % 1000) * 1000;
+        
+        int result = select(STDIN_FILENO + 1, &readfds, NULL, NULL, &tv);
+        
+        if (result > 0) {
+            if (fgets(buff, 4096, stdin)) {
+                size_t len = strlen(buff);
+                if (len > 0 && buff[len - 1] == '\n') {
+                    buff[len - 1] = '\0';
+                }
+                return buff;
+            }
+        } else if (result == 0) {
+            break;
+        } else {
+            break;
+        }
+    }
+    
+    free(buff);
+    return NULL;
+}
+#endif
+
+char* input(char* qry){
+    printf("%s", qry);
+    fflush(stdout);
+    char* buff = malloc(4096); //4kb is sufficient
+    if (!buff){
+        printf("Failed to allocate memory to read input.\n");
+        return NULL;
+    }
+    if (fgets(buff, 4096, stdin)){
+        size_t len = strlen(buff);
+        if (len > 0 && buff[len - 1] == '\n') {
+            buff[len - 1] = '\0'; //remove the newline
+        }
+        return buff;
+    }
+    else{
+        free(buff);
+        return NULL;
+    }
+}
+
+const char* cli_arrow = "›";
+
+void help(char* issue){
+    if (issue == NULL){
+        issue = "No args found.";
+    }
+    char* repeat(char item, int count){
+        char* buff = malloc(count + 1);
+        if (!buff){
+            printf("Failed to allocate memory to repeat text.\n");
+            return NULL;
+        }
+        for (int index = 0; index < count; index++){
+            buff[index] = item;
+        }
+        buff[count] = '\0';
+        return buff;
+    }
+    char* rep = repeat('=', strlen(issue));
+    if (!rep){
+        return;
+    }
+    printf("=====%s=====\n", rep);
+    printf("==== %s ====\n", issue);
+    printf("=====%s=====\n", rep);
+    free(rep);
+    printf("\n");
+    printf("cleanai --new\n");
+    printf("             --config path/to/config.json\n");
+    printf("                                         --train\n");
+    printf("                                                   [--pretrain]\n");
+    printf("                                         --pretrain\n");
+    printf("                                                   [--train]\n");
+    printf("        --load path/to/model.zip\n");
+    printf("                                [--config path/to/config.json]\n");
+    printf("                                                              [--train]\n");
+    printf("                                                                          [--pretrain]\n");
+    printf("                                                              [--pretrain]\n");
+    printf("                                                                          [--train]\n");
+    printf("\n");
+    printf("Note: Arguments between square brackets ([...]) are optional.\n");
+}
+
+bool file_exists(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (f) {
+        fclose(f);
+        return true;
+    }
+    return false;
+}
+
+char* read_file(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        printf("Failed to open file at path \"%s\".\n", path);
+        return NULL;
+    }
+
+    fseek(f, 0, SEEK_END);
+    size_t size = ftell(f);
+    rewind(f);
+
+    char* buffer = malloc(size + 1);
+    if (!buffer) {
+        printf("Failed to allocate memory to read file at path \"%s\".\n", path);
+        fclose(f);
+        return NULL;
+    }
+
+    size_t read = fread(buffer, 1, size, f);
+    fclose(f);
+
+    if (read != size) {
+        printf("Failed to read file at path \"%s\".\n", path);
+        free(buffer);
+        return NULL;
+    }
+
+    buffer[size] = '\0'; // null-terminate for safety
+    return buffer;
+}
+
+int main(int argc, char** argv){
+    int* ids = malloc(1); //1 byte init alloc
+
+    if (!ids){
+        printf("Failed memory allocation for ids, ids will not be tracked therefore ids may not be strictly unique.\n");
+    }
+
+    int ids_len = 0;
+
+    srand(time(NULL));
+
+    int genid(){
+        int id;
+        while (true){
+            id = rand() % 100000;
+
+            if (!ids){
+                return id;
+            }
+
+            if (ids_len == 100000){
+                printf("All possible ids combinations exhaused, this id will be a duplicate of another id.\n");
+                return id;
+            }
+
+            bool found = false;
+            for (int index = 0; index < ids_len; index++){
+                if (ids[index] == id){
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found){
+                break;
+            }
+        }
+        //grw
+        int* tmp_ids = realloc(ids, (ids_len + 1) * sizeof(int));
+        if (!tmp_ids){
+            printf("Failed memory allocation to grow ids list.\n");
+            return id; //better to return something than nothing
+        }
+        ids = tmp_ids;
+
+        ids[ids_len] = id;
+        ids_len++;
+        return id;
+    }
+
+    int freeId(int id){
+        int indexOfId = -1;
+        for (int index = 0; index < ids_len; index++){
+            if (id == ids[index]){
+                indexOfId = index;
+                break;
+            }
+        }
+        if (indexOfId == -1){
+            return -1; //id not found
+        }
+
+        //shrnk
+        int* n_ids = malloc((ids_len - 1) * sizeof(int));
+        if (!n_ids){
+            printf("Failed to allocate memory to shrink ids list.\n");
+            return -1;
+        }
+
+        int offset = 0;
+        for (int index = 0; index < ids_len; index++){
+            if (index == indexOfId){
+                offset += 1;
+                continue;
+            }
+            n_ids[index - offset] = ids[index];
+        }
+
+        free(ids);
+        ids = n_ids;
+        ids_len--;
+        return 0;
+    }
+
+    long long** timers = malloc(1); //1 byte init alloc
+    
+    if (!timers){
+        printf("Failed memory allocation for timers, timers will not be available.\n");
+    }
+
+    int timers_len = 0; //0 elements
+
+    long long timer(){
+        if (!timers){
+            return -1;
+        }
+
+        long long curr_time = time_ms();
+        
+        //grw
+        long long id = (long long)(genid());
+        
+        long long** tmp_timers = realloc(timers, (timers_len + 1) * sizeof(long long*));
+        if (!tmp_timers){
+            printf("Failed memory allocation to grow timers list.\n");
+            return -1;
+        }
+        timers = tmp_timers;
+        timers[timers_len] = malloc(2 * sizeof(long long)); //id, timestamp
+
+        if (!timers[timers_len]){
+            printf("Failed memory allocation to grow timers list.\n");
+        }
+        timers[timers_len][0] = id;
+        timers[timers_len][1] = curr_time;
+        timers_len++;
+        return id;
+    }
+
+    long long timer_end(long long timer_id){
+        int indexOfTimer = -1;
+        long long timer_time;
+        for (int index = 0; index < timers_len; index++){
+            if (timers[index][0] == timer_id){
+                indexOfTimer = index;
+                timer_time = time_ms() - timers[index][1];
+                break;
+            }
+        }
+        if (indexOfTimer == -1){
+            return -1; //invalid timer id.
+        }
+
+        //shrnk
+        long long** new_timers = malloc((timers_len - 1) * sizeof(long long*));
+        if (!new_timers){
+            printf("Failed memory allocation to shrink timers list.\n");
+            return -1;
+        }
+
+        int offset = 0;
+        for (int index = 0; index < timers_len; index++){
+            if (index == indexOfTimer){
+                offset++;
+                continue;
+            }
+            new_timers[index - offset] = malloc(2 * sizeof(long long));
+            if (!new_timers[index - offset]){
+                printf("Failed memory allocation to shrink timers list.\n");
+                for (int subindex = 0; subindex < timers_len - index - offset; subindex++){
+                    free(new_timers[subindex]);
+                }
+                free(new_timers);
+                return -1;
+            }
+            new_timers[index - offset][0] = timers[index][0];
+            new_timers[index - offset][1] = timers[index][1];
+        }
+
+        for (int index = 0; index < timers_len; index++){
+            free(timers[index]);
+        }
+        free(timers);
+        timers = new_timers;
+        timers_len--;
+        
+        //oh also
+        freeId((int)(timer_id));
+
+        return timer_time;
+    }
+
+    //store filename separately
+    char* self_filename = malloc(strlen(argv[0]) + 1);
+    if (!self_filename){
+        printf("Failed to allocate memory to parse args.\n");
+        return 1;
+    }
+    strcpy(self_filename, argv[0]);
+    //remove file name from argv
+    char** nargv = malloc((argc + 1) * sizeof(char*));
+    if (!nargv){
+        printf("Failed to allocate memory to parse args.\n");
+        return 1;
+    }
+    nargv[argc] = NULL;
+    for (int index = 1; index < argc; index++){
+        nargv[index - 1] = malloc(strlen(argv[index]) + 1);
+        if (!nargv[index - 1]){
+            printf("Failed to allocate memory to parse args.\n");
+            return 1; //os will auto reclaim memory
+        }
+        strcpy(nargv[index - 1], argv[index]);
+    }
+    argv = nargv;
+    argc--;
+
+    //parse arguments
+    bool do_pretrain = false;
+    bool do_train = false;
+    bool new = false;
+    bool load = false;
+
+    char* valid_flags[] = {"--new", "--load", "--config", "--train", "--pretrain", NULL};
+    int valid_flags_len = 0;
+    while (true){
+        if (!(valid_flags[valid_flags_len] == NULL)){
+            valid_flags_len++;
+        }
+        else{
+            break;
+        }
+    }
+    
+    char* config_location = malloc(1); //dummy init
+    bool config_init = false;
+    char* model_location = malloc(1); //dummy init
+    if (!config_location){
+        printf("Failed to allocate memory to parse args.\n");
+        return -1;
+    }
+    if (!model_location){
+        printf("Failed to allocate memory to parse args.\n");
+        return -1;
+    }
+
+    config_location[0] = '\0'; //if printed safe anyways :)
+    model_location[0] = '\0';
+
+    if (argc == 0){
+        help(NULL);
+        return 0;
+    }
+    
+    bool nextIsVal = false;
+    for (int index = 0; index < argc; index++){
+        char* arg = argv[index];
+        if (nextIsVal){
+            nextIsVal = false;
+            continue;
+        }
+        if (strcmp(arg, "--new") == 0){
+            if (new){
+                help("You can't specify --new multiple times.");
+                return 0;
+            }
+            if (load){
+                help("You can't specify --new and --load at the same time.");
+                return 0;
+            }
+            new = true;
+        }
+        else{
+            if (strcmp(arg, "--load") == 0){
+                if (load){
+                    help("You can't specify --load multiple times.");
+                    return 0;
+                }
+                if (new){
+                    help("You can't specify --load and --new at the same time.");
+                    return 0;
+                }
+                load = true;
+                if (argc - index - 1 == 0){
+                    help("You need to specify a model file path after --load.");
+                    return 0;
+                }
+                nextIsVal = true;
+                char* nextArg = argv[index + 1];
+                for (int subindex = 0; subindex < valid_flags_len; subindex++){
+                    if (strcmp(nextArg, valid_flags[subindex]) == 0){
+                        nextIsVal = false;
+                        break;
+                    }
+                }
+                if (!nextIsVal){
+                    help("You need to specify a model file path after --load.");
+                    return 0;
+                }
+                model_location = realloc(model_location, strlen(nextArg) + 1);
+                if (!model_location){ //no need to use tmp we exit if fail anyways
+                    printf("Failed to allocate memory to parse args.\n");
+                    return 1;
+                }
+                strcpy(model_location, nextArg);
+            }
+            else{
+                if (strcmp(arg, "--train") == 0){
+                    if (do_train){
+                        help("You can't specify --train multiple times.");
+                        return 0;
+                    }
+                    do_train = true;
+                }
+                else{
+                    if (strcmp(arg, "--pretrain") == 0){
+                        if (do_pretrain){
+                            help("You can't specify --pretrain multiple times.");
+                            return 0;
+                        }
+                        do_pretrain = true;
+                    }
+                    else{
+                        if (strcmp(arg, "--config") == 0){
+                            if (config_init){
+                                help("You can't specify --config multiple times.");
+                                return 0;
+                            }
+                            config_init = true;
+                            if (argc - index - 1 == 0){
+                                help("You need to specify a config file path after --config.");
+                                return 0;
+                            }
+                            nextIsVal = true;
+                            char* nextArg = argv[index + 1];
+                            for (int subindex = 0; subindex < valid_flags_len; subindex++){
+                                if (strcmp(nextArg, valid_flags[subindex]) == 0){
+                                    nextIsVal = false;
+                                    break;
+                                }
+                            }
+                            if (!nextIsVal){
+                                help("You need to specify a config file path after --config.");
+                                return 0;
+                            }
+                            config_location = realloc(config_location, strlen(nextArg) + 1);
+                            if (!config_location){
+                                printf("Failed to allocate memory to parse args.\n");
+                                return 1;
+                            }
+                            strcpy(config_location, nextArg);
+                        }
+                        else{
+                            int help_message_len = strlen("Arg \"") + strlen(arg) + strlen("\" is invalid.") + 1;
+                            char* help_message = malloc(help_message_len);
+                            if (!help_message){
+                                printf("Failed to allocate memory to parse args.\n");
+                                return 1;
+                            }
+                            sprintf(help_message, "Arg \"%s\" is invalid.", arg);
+                            help(help_message);
+                            return 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (new){
+        if ((!do_pretrain) && (!do_train)){
+            help("You need to specify either or both --pretrain and --train with --new.");
+        }
+    }
+
+    if (new){
+        if (!config_init){
+            help("You need to specify a config file path with --config.");
+            return 0;
+        }
+    }
+
+    if (load){
+        if (do_train || do_pretrain){
+            if (!config_init){
+                help("You need to specify a config file path with --config.");
+                return 0;
+            }
+        }
+    }
+
+    if (!file_exists(config_location)){
+        printf("Failed to open config file. Most likely causes are that it doesn't exist or that you don't have the required permissions to read it.\n");
+        return 1;
+    }
+
+    if (load){
+        if (!file_exists(model_location)){
+            printf("Failed to open model file. Most likely causes are that it doesn't exist or that you don't have the required permissions to read it.\n");
+            return -1;
+        }
+    }
+
+    printf("Arguments parsed successfully :)\n");
+
+    printf("Reading config file...\n");
+    char* config_file = read_file(config_location);
+    if (!config_file){
+        printf("Failed to read config file.\n");
+        return 1;
+    }
+    //try to parse json
+    cJSON* config = cJSON_Parse(config_file);
+    if (!config){
+        printf("Failed to parse config. Common cause: corrupted json.\n");
+        return 1;
+    }
+
+    bool isInt(double n){
+        if ((int)(n) == n){
+            return true;
+        }
+        else{
+            return false;
+        }
+    }
+
+    bool isFloat(double n){
+        return !isInt(n);
+    }
+
+    cJSON* pre_training_paths_raw = cJSON_GetObjectItem(config, "pre-training-paths");
+    char** pre_training_paths = NULL;
+    if (!cJSON_IsArray(pre_training_paths_raw)){
+        if (!do_pretrain){
+            printf("[Config] [Warning] pre-training-paths is missing/corrupted but --pretrain is not specified therefore this can be ignored.\n");
+        }
+        else{
+            printf("[Config] [Fatal] pre-training-paths is missing/corrupted.\n");
+            return 1;
+        }
+    }
+    else{
+        if (!do_pretrain){
+            printf("[Config] [Info] Ignoring pre-training-paths as you did not specify --pretrain.\n");
+        }
+        else{
+            int pre_training_paths_len = cJSON_GetArraySize(pre_training_paths_raw);
+            if (pre_training_paths_len == 0){
+                printf("[Config] [Fatal] pre-training-paths is empty.\n");
+                return 1;
+            }
+            pre_training_paths = malloc(pre_training_paths_len * sizeof(char*));
+            if (!pre_training_paths){
+                printf("Failed to allocate memory to parse config.\n");
+                return 1;
+            }
+            for (int index = 0; index < pre_training_paths_len; index++){
+                cJSON* item = cJSON_GetArrayItem(pre_training_paths_raw, index);
+                if (!cJSON_IsString(item)){
+                    printf("[Config] [Fatal] Item %d/%d of pre-training-paths is not a string.\n", index + 1, pre_training_paths_len);
+                    return 1;
+                }
+                pre_training_paths[index] = malloc(strlen(item->valuestring) + 1);
+                if (!pre_training_paths[index]){
+                    printf("Failed to allocate memory to parse config.\n");
+                    return 1;
+                }
+                strcpy(pre_training_paths[index], item->valuestring);
+                if (strlen(pre_training_paths[index]) == 0){
+                    printf("[Config] [Fatal] Item %d/%d of pre-training-paths isn't a valid file path.\n", index + 1, pre_training_paths_len);
+                    return 1;
+                }
+                if (!file_exists(pre_training_paths[index])){
+                    printf("[Config] [Fatal] Item %d/%d of pre-training-paths isn't a valid file path.\n", index + 1, pre_training_paths_len);
+                    return 1;
+                }
+            }
+        }
+    }
+
+    cJSON* training_dataset_path_raw = cJSON_GetObjectItem(config, "training-dataset-path");
+    char* training_dataset_path = NULL;
+    if (!cJSON_IsString(training_dataset_path_raw)){
+        if (!do_train){
+            printf("[Config] [Warning] training-dataset-path is missing/corrupted but --train is not specified therefore this can be ignored.\n");
+        }
+        else{
+            printf("[Config] [Fatal] training-dataset-path is missing/corrupted.\n");
+            return 1;
+        }
+    }
+    else{
+        if (!do_train){
+            printf("[Config] [Info] Ignoring training-dataset-path as you did not specify --train.\n");
+        }
+        else{
+            if (strlen(training_dataset_path_raw->valuestring) == 0){
+                printf("[Config] [Fatal] training-dataset-path is not a valid file path.\n");
+                return 1;
+            }
+            if (!file_exists(training_dataset_path_raw->valuestring)){
+                printf("[Config] [Fatal] training-dataset-path is not a valid file path.\n");
+                return 1;
+            }
+            else{
+                training_dataset_path = malloc(strlen(training_dataset_path_raw->valuestring) + 1);
+                if (!training_dataset_path){
+                    printf("Failed to allocate memory to parse config.\n");
+                    return 1;
+                }
+                strcpy(training_dataset_path, training_dataset_path_raw->valuestring);
+            }
+        }
+    }
+
+    cJSON* pre_train_epochs_raw = cJSON_GetObjectItem(config, "pre-train-epochs");
+    int pre_train_epochs = -1;
+    if (!cJSON_IsNumber(pre_train_epochs_raw)){
+        if (do_pretrain){
+            printf("[Config] [Fatal] pre-train-epochs is missing/corrupted.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] pre-train-epochs is missing/corrupted but you did not specify --pretrain therefore this can be ignored.\n");
+        }
+    }
+    else{
+        if (!(isInt(pre_train_epochs_raw->valuedouble))){
+            if (do_pretrain){
+                printf("[Config] [Fatal] pre-train-epochs is supposed to be an int but it is a float.\n");
+                return 1;
+            }
+            else{
+                printf("[Config] [Warning] pre-train-epochs is supposed to be an int but it is a float, as you did not specify --pretrain this can be ignored.\n");
+            }
+        }
+        else{
+            if ((int)(pre_train_epochs_raw->valuedouble) < 1){
+                if (do_pretrain){
+                    printf("[Config] [Fatal] pre-train-epochs is supposed to be >= 1, but it is set to %d.\n", (int)(pre_train_epochs_raw->valuedouble));
+                    return -1;
+                }
+                else{
+                    printf("[Config] [Warning] pre-train-epochs is supposed to be >= 1, but it is set to %d. However as you did not specify --pretrain this can be ignored.\n", (int)(pre_train_epochs_raw->valuedouble));
+                }
+            }
+            else{
+                if (do_pretrain){
+                    pre_train_epochs = (int)(pre_train_epochs_raw->valuedouble);
+                }
+                else{
+                    printf("[Config] [Info] Ignoring pre-train-epochs as you did not specify --pretrain.\n");
+                }
+            }
+        }
+    }
+
+    cJSON* train_epochs_raw = cJSON_GetObjectItem(config, "train-epochs");
+    int train_epochs = -1;
+    if (!cJSON_IsNumber(train_epochs_raw)){
+        if (do_train){
+            printf("[Config] [Fatal] train-epochs is missing/corrupted.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] train-epochs is missing/corrupted but you did not specify --train therefore this can be ignored.\n");
+        }
+    }
+    else{
+        if (!(isInt(train_epochs_raw->valuedouble))){
+            if (do_train){
+                printf("[Config] [Fatal] train-epochs is supposed to be an int but it is a float.\n");
+                return 1;
+            }
+            else{
+                printf("[Config] [Warning] train-epochs is supposed to be an int but it is a float, as you did not specify --train this can be ignored.\n");
+            }
+        }
+        else{
+            if ((int)(train_epochs_raw->valuedouble) < 1){
+                if (do_train){
+                    printf("[Config] [Fatal] train-epochs is supposed to be >= 1, but it is set to %d.\n", (int)(train_epochs_raw->valuedouble));
+                    return 1;
+                }
+                else{
+                    printf("[Config] [Warning] train-epochs is supposed to be >= 1, but it is set to %d. However as you did not specify --train this can be ignored.\n", (int)(train_epochs_raw->valuedouble));
+                }
+            }
+            else{
+                if (do_train){
+                    train_epochs = (int)(train_epochs_raw->valuedouble);
+                }
+                else{
+                    printf("[Config] [Info] Ignoring train-epochs as you did not specify --train.\n");
+                }
+            }
+        }
+    }
+
+    cJSON* pre_train_optimizer_raw = cJSON_GetObjectItem(config, "pre-train-optimizer");
+    char* pre_train_optimizer = NULL;
+
+    if (!cJSON_IsString(pre_train_optimizer_raw)){
+        if (do_pretrain){
+            printf("[Config] [Fatal] pre-train-optimizer is missing/corrupted.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] pre-train-optimizer is missing/corrupted but you did not specify --pretrain therefore this can be ignored.\n");
+        }
+    }
+    else{
+        if ((!(strcmp("adam", pre_train_optimizer_raw->valuestring) == 0)) && (!(strcmp("sgd_momentum", pre_train_optimizer_raw->valuestring))) && (!(strcmp("sgd", pre_train_optimizer_raw->valuestring)))){
+            if (do_pretrain){
+                printf("[Config] [Fatal] pre-train-optimizer is supposed to be either \"adam\", \"sgd_momentum\" or \"sgd\" but it is set to %s.\n", pre_train_optimizer_raw->valuestring);
+            }
+            else{
+                printf("[Config] [Warning] pre-train-optimizer is supposed to be either \"adam\", \"sgd_momentum\" or \"sgd\" but it is set to %s. However as you did not specify --pretrain this can be ignored.\n", pre_train_optimizer_raw->valuestring);
+            }
+        }
+        else{
+            if (do_pretrain){
+                pre_train_optimizer = malloc(strlen(pre_train_optimizer_raw->valuestring) + 1);
+                if (!pre_train_optimizer){
+                    printf("Failed to allocate memory to parse config.\n");
+                    return 1;
+                }
+                else{
+                    strcpy(pre_train_optimizer, pre_train_optimizer_raw->valuestring);
+                }
+            }
+            else{
+                printf("[Config] [Info] Ignoring pre-train-optimizer as you did not specify --pretrain.\n");
+            }
+        }
+    }
+    
+    cJSON* train_optimizer_raw = cJSON_GetObjectItem(config, "train-optimizer");
+    char* train_optimizer = NULL;
+
+    if (!cJSON_IsString(train_optimizer_raw)){
+        if (do_train){
+            printf("[Config] [Fatal] train-optimizer is missing/corrupted.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] train-optimizer is missing/corrupted but you did not specify --train therefore this can be ignored.\n");
+        }
+    }
+    else{
+        if ((!(strcmp("adam", train_optimizer_raw->valuestring) == 0)) && (!(strcmp("sgd_momentum", train_optimizer_raw->valuestring))) && (!(strcmp("sgd", train_optimizer_raw->valuestring)))){
+            if (do_train){
+                printf("[Config] [Fatal] train-optimizer is supposed to be either \"adam\", \"sgd_momentum\" or \"sgd\" but it is set to %s.\n", train_optimizer_raw->valuestring);
+            }
+            else{
+                printf("[Config] [Warning] train-optimizer is supposed to be either \"adam\", \"sgd_momentum\" or \"sgd\" but it is set to %s. However as you did not specify --train this can be ignored.\n", train_optimizer_raw->valuestring);
+            }
+        }
+        else{
+            if (do_train){
+                train_optimizer = malloc(strlen(train_optimizer_raw->valuestring) + 1);
+                if (!train_optimizer){
+                    printf("Failed to allocate memory to parse config.\n");
+                    return 1;
+                }
+                else{
+                    strcpy(train_optimizer, train_optimizer_raw->valuestring);
+                }
+            }
+            else{
+                printf("[Config] [Info] Ignoring train_optimizer as you did not specify --train.\n");
+            }
+        }
+    }
+
+    cJSON* contextSize_raw = cJSON_GetObjectItem(config, "contextSize");
+    int contextSize = -1;
+
+    if (!cJSON_IsNumber(contextSize_raw)){
+        printf("[Config] [Fatal] contextSize is missing/corrupted.\n");
+        return 1;
+    }
+    else{
+        if (!isInt(contextSize_raw->valuedouble)){
+            printf("[Config] [Fatal] contextSize is supposed to be an int but it is a float.\n");
+            return 1;
+        }
+        else{
+            if ((int)(contextSize_raw->valuedouble) < 1){
+                printf("[Config] [Fatal] contextSize is supposed to be >= 1 but it is set to %d.\n", (int)(contextSize_raw->valuedouble));
+                return 1;
+            }
+            else{
+                contextSize = (int)(contextSize_raw->valuedouble);
+            }
+        }
+    }
+
+    cJSON* learningRate_raw = cJSON_GetObjectItem(config, "learningRate");
+    double learningRate = 0xdeadbeef;
+    if (!cJSON_IsNumber(learningRate_raw)){
+        if (do_train || do_pretrain){
+            printf("[Config] [Fatal] learningRate is missing/corrupted.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] learningRate is missing/corrupted but you did not specify either --pretrain or --train therefore this can be ignored.\n");
+        }
+    }
+    else{
+        if (do_train || do_pretrain){
+            learningRate = learningRate_raw->valuedouble;
+        }
+        else{
+            printf("[Config] [Info] Ignoring learningRate as you did not specify either --pretrain or --train.\n");
+        }
+        if (learningRate < 0){
+            printf("[Console] [Info] Showing tip anyways :)\n");
+            printf("[Config] [Tip] A learningRate < 0 will make the model unlearn the data. This is not recomended, you are on your own, good luck.\n");
+        }
+    }
+
+    cJSON* maxOutputSize_raw = cJSON_GetObjectItem(config, "maxOutputSize");
+    int maxOutputSize = -1;
+
+    if (!cJSON_IsNumber(maxOutputSize_raw)){
+        printf("[Config] [Fatal] maxOutputSize is missing/corrupted.\n");
+        return 1;
+    }
+    else{
+        if (!isInt(maxOutputSize_raw->valuedouble)){
+            printf("[Config] [Fatal] maxOutputSize is supposed to be an int but it is a float.\n");
+            return 1;
+        }
+        else{
+            if ((int)(maxOutputSize_raw->valuedouble) < 1){
+                printf("[Config] [Fatal] maxOutputSize is supposed to be >= 1 but it is set to %d.\n", (int)(maxOutputSize_raw->valuedouble));
+                return 1;
+            }
+            else{
+                maxOutputSize = (int)(maxOutputSize_raw->valuedouble);
+            }
+        }
+    }
+
+    cJSON* batchSize_raw = cJSON_GetObjectItem(config, "batchSize");
+    int batchSize = -1;
+
+    if (!cJSON_IsNumber(batchSize_raw)){
+        if (do_pretrain || do_train){
+            printf("[Config] [Fatal] batchSize is missing/corrupted.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] batchSize is missing/corrupted but you did not specify either --pretrain or --train therefore this can be ignored.\n");
+        }
+    }
+    else{
+        if (!isInt(batchSize_raw->valuedouble)){
+            if (do_pretrain || do_train){
+                printf("[Config] [Fatal] batchSize is supposed to be an int but it is a float.\n");
+                return 1;
+            }
+            else{
+                printf("[Config] [Warning] batchSize is supposed to be an int but it is a float but you did not specify either --pretrain or --train therefore this can be ignored.\n");
+            }
+        }
+        else{
+            if ((int)(batchSize_raw->valuedouble) < 1){
+                if (do_pretrain || do_train){
+                    printf("[Config] [Fatal] batchSize is supposed to be >= 1 but it is set to %d.\n", (int)(maxOutputSize_raw->valuedouble));
+                    return 1;
+                }
+                else{
+                    printf("[Config] [Warning] batchSize is supposed to be >= 1 but it is set to %d but you did not specify either --pretrain or --train therefore this can be ignored.\n", (int)(maxOutputSize_raw->valuedouble));
+                }
+            }
+            else{
+                if (do_pretrain || do_train){
+                    batchSize = (int)(batchSize_raw->valuedouble);
+                }
+                else{
+                    printf("[Config] [Info] Ignoring batchSize as you did not specify either --pretrain or --train.\n");
+                }
+            }
+        }
+    }
+
+    cJSON* antiOverfittingOptimisations_raw = cJSON_GetObjectItem(config, "antiOverfittingOptimisations");
+    bool antiOverfittingOptimisations = false; //yea i'll be fair here i can't put a cool dummy value.
+    
+    if (!cJSON_IsBool(antiOverfittingOptimisations_raw)){
+        if (do_pretrain || do_train){
+            printf("[Config] [Fatal] antiOverfittingOptimisations is missing/corrupted.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] antiOverfittingOptimisations is missing/corrupted but you did not specify either --pretrain or --train therefore this can be ignored.\n");
+        }
+    }
+    else{
+        if (do_pretrain || do_train){
+            antiOverfittingOptimisations = cJSON_IsTrue(antiOverfittingOptimisations_raw);
+        }
+        else{
+            printf("[Config] [Info] Ignoring antiOverfittingOptimisations as you did not specify either --pretrain or --train.\n");
+        }
+    }
+
+    cJSON* embeddingSize_raw = cJSON_GetObjectItem(config, "embeddingSize");
+    int embeddingSize = -1;
+    if (!cJSON_IsNumber(embeddingSize_raw)){
+        if (new){
+            printf("[Config] [Fatal] embeddingSize is missing/corrutped.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] embeddingSize is missing/corrupted but you are loading a model, not creating one therefore this can be ignored.\n");
+        }
+    }
+    else{
+        if (!isInt(embeddingSize_raw->valuedouble)){
+            if (new){
+                printf("[Config] [Fatal] embeddingSize is supposed to be an int but it is a float.\n");
+                return 1;
+            }
+            else{
+                printf("[Config] [Warning] embeddingSize is supposed to be an int but it is a float, but you are loading a model, not creating a new one therefore this can be ignored.\n");
+            }
+        }
+        else{
+            if ((int)(embeddingSize_raw->valuedouble) < 1){
+                if (new){
+                    printf("[Config] [Fatal] embeddingSize is supposed to be >= 1 but it is set to %d.\n", (int)(embeddingSize_raw->valuedouble));
+                    return 1;
+                }
+                else{
+                    printf("[Config] [Warning] embeddingSize is supposed to be >= 1 but it is set to %d, but you are loading a model, not creating a new one therefore this can be ignored.\n");
+                }
+            }
+            else{
+                if (new){
+                    embeddingSize = (int)(embeddingSize_raw->valuedouble);
+                }
+                else{
+                    printf("[Config] [Info] Ignoring embeddingSize as you are loading a model, not creating a new one.\n");
+                }
+            }
+        }
+    }
+
+    cJSON* layersAmount_raw = cJSON_GetObjectItem(config, "layersAmount");
+    int layersAmount = -1;
+    if (!cJSON_IsNumber(layersAmount_raw)){
+        if (new){
+            printf("[Config] [Fatal] layersAmount is missing/corrutped.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] layersAmount is missing/corrupted but you are loading a model, not creating one therefore this can be ignored.\n");
+        }
+    }
+    else{
+        if (!isInt(layersAmount_raw->valuedouble)){
+            if (new){
+                printf("[Config] [Fatal] layersAmount is supposed to be an int but it is a float.\n");
+                return 1;
+            }
+            else{
+                printf("[Config] [Warning] layersAmount is supposed to be an int but it is a float, but you are loading a model, not creating a new one therefore this can be ignored.\n");
+            }
+        }
+        else{
+            if ((int)(layersAmount_raw->valuedouble) < 1){
+                if (new){
+                    printf("[Config] [Fatal] layersAmount is supposed to be >= 1 but it is set to %d.\n", (int)(embeddingSize_raw->valuedouble));
+                    return 1;
+                }
+                else{
+                    printf("[Config] [Warning] layersAmount is supposed to be >= 1 but it is set to %d, but you are loading a model, not creating a new one therefore this can be ignored.\n");
+                }
+            }
+            else{
+                if (new){
+                    layersAmount = (int)(layersAmount_raw->valuedouble);
+                }
+                else{
+                    printf("[Config] [Info] Ignoring layersAmount as you are loading a model, not creating a new one.\n");
+                }
+            }
+        }
+    }
+
+    cJSON* heads_raw = cJSON_GetObjectItem(config, "heads");
+    int heads = -1;
+    if (!cJSON_IsNumber(heads_raw)){
+        if (new){
+            printf("[Config] [Fatal] heads is missing/corrutped.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] heads is missing/corrupted but you are loading a model, not creating one therefore this can be ignored.\n");
+        }
+    }
+    else{
+        if (!isInt(heads_raw->valuedouble)){
+            if (new){
+                printf("[Config] [Fatal] heads is supposed to be an int but it is a float.\n");
+                return 1;
+            }
+            else{
+                printf("[Config] [Warning] heads is supposed to be an int but it is a float, but you are loading a model, not creating a new one therefore this can be ignored.\n");
+            }
+        }
+        else{
+            if ((int)(heads_raw->valuedouble) < 1){
+                if (new){
+                    printf("[Config] [Fatal] heads is supposed to be >= 1 but it is set to %d.\n", (int)(embeddingSize_raw->valuedouble));
+                    return 1;
+                }
+                else{
+                    printf("[Config] [Warning] heads is supposed to be >= 1 but it is set to %d, but you are loading a model, not creating a new one therefore this can be ignored.\n");
+                }
+            }
+            else{
+                if (new){
+                    heads = (int)(heads_raw->valuedouble);
+                }
+                else{
+                    printf("[Config] [Info] Ignoring heads as you are loading a model, not creating a new one.\n");
+                }
+            }
+        }
+    }
+
+    cJSON* biasesinitrange_raw = cJSON_GetObjectItem(config, "biasesinitrange");
+    double* biasesinitrange = NULL;
+
+    if (!cJSON_IsArray(biasesinitrange_raw)){
+        if (new){
+            printf("[Config] [Fatal] biasesinitrange is missing/corrupted.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] biasesinitrange is missing/corrupted but you are loading a model, not creating a new one therefore this can be ignored.\n");
+        }
+    }
+    else{
+        int arr_size = cJSON_GetArraySize(biasesinitrange_raw);
+        if (!(arr_size == 2)){
+            if (new){
+                printf("[Config] [Fatal] biasesinitrange is supposed to contain two elements, it currently contains %d elements.\n", arr_size);
+                return 1;
+            }
+            else{
+                printf("[Config] [Warning] biasesinitrange is supposed to contain two elements, it currently contains %d elements but you are loading a model, not creating a new one therefore this can be ignored.\n", arr_size);
+            }
+        }
+        else{
+            cJSON* elem_a = cJSON_GetArrayItem(biasesinitrange_raw, 0);
+            cJSON* elem_b = cJSON_GetArrayItem(biasesinitrange_raw, 1);
+            
+            if (!cJSON_IsNumber(elem_a)){
+                if (new){
+                    printf("[Config] [Fatal] biasesinitrange's elements are supposed to be numbers, however first element is an impostor.\n");
+                    return 1;
+                }
+                else{
+                    printf("[Config] [Warning] biasesinitrange's elements are supposed to be numbers, however the first element is an impostor, but because you are loading a model and not creating a new one this can be ignored.\n");
+                }
+            }
+            
+            if (!cJSON_IsNumber(elem_b)){
+                if (new){
+                    printf("[Config] [Fatal] biasesinitrange's elements are supposed to be numbers, however second element is an impostor.\n");
+                    return 1;
+                }
+                else{
+                    printf("[Config] [Warning] biasesinitrange's elements are supposed to be numbers, however the second element is an impostor, but because you are loading a model and not creating a new one this can be ignored.\n");
+                }
+            }
+
+            if (new){
+                biasesinitrange = malloc(2 * sizeof(double));
+                if (!biasesinitrange){
+                    printf("Failed memory allocation to parse config.\n");
+                    return 1;
+                }
+                biasesinitrange[0] = elem_a->valuedouble;
+                biasesinitrange[1] = elem_b->valuedouble;
+            }
+            else{
+                printf("[Config] [Info] Ignoring biasesinitrange as you are loading a model, not creating a new one.\n");
+            }
+        }
+    }
+
+    cJSON* embeddinginitrange_raw = cJSON_GetObjectItem(config, "embeddinginitrange");
+    double* embeddinginitrange = NULL;
+
+    if (!cJSON_IsArray(embeddinginitrange_raw)){
+        if (new){
+            printf("[Config] [Fatal] embeddinginitrange is missing/corrupted.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] embeddinginitrange is missing/corrupted but you are loading a model, not creating a new one therefore this can be ignored.\n");
+        }
+    }
+    else{
+        int arr_size = cJSON_GetArraySize(embeddinginitrange_raw);
+        if (!(arr_size == 2)){
+            if (new){
+                printf("[Config] [Fatal] embeddinginitrange is supposed to contain two elements, it currently contains %d elements.\n", arr_size);
+                return 1;
+            }
+            else{
+                printf("[Config] [Warning] embeddinginitrange is supposed to contain two elements, it currently contains %d elements but you are loading a model, not creating a new one therefore this can be ignored.\n", arr_size);
+            }
+        }
+        else{
+            cJSON* elem_a = cJSON_GetArrayItem(embeddinginitrange_raw, 0);
+            cJSON* elem_b = cJSON_GetArrayItem(embeddinginitrange_raw, 1);
+            
+            if (!cJSON_IsNumber(elem_a)){
+                if (new){
+                    printf("[Config] [Fatal] embeddinginitrange's elements are supposed to be numbers, however first element is an impostor.\n");
+                    return 1;
+                }
+                else{
+                    printf("[Config] [Warning] embeddinginitrange's elements are supposed to be numbers, however the first element is an impostor, but because you are loading a model and not creating a new one this can be ignored.\n");
+                }
+            }
+            
+            if (!cJSON_IsNumber(elem_b)){
+                if (new){
+                    printf("[Config] [Fatal] embeddinginitrange's elements are supposed to be numbers, however second element is an impostor.\n");
+                    return 1;
+                }
+                else{
+                    printf("[Config] [Warning] embeddinginitrange's elements are supposed to be numbers, however the second element is an impostor, but because you are loading a model and not creating a new one this can be ignored.\n");
+                }
+            }
+
+            if (new){
+                embeddinginitrange = malloc(2 * sizeof(double));
+                if (!embeddinginitrange){
+                    printf("Failed memory allocation to parse config.\n");
+                    return 1;
+                }
+                embeddinginitrange[0] = elem_a->valuedouble;
+                embeddinginitrange[1] = elem_b->valuedouble;
+            }
+            else{
+                printf("[Config] [Info] Ignoring embeddinginitrange as you are loading a model, not creating a new one.\n");
+            }
+        }
+    }
+
+    printf("Reading vocabulary file (vocabulary.json)...\n");
+    char* vocab_file = read_file("vocabulary.json");
+    if (!vocab_file){
+        printf("Failed to read vocabulary file.\n");
+        return 1;
+    }
+    printf("Read vocabulary file.\n");
+    printf("Parsing vocabulary...\n");
+    cJSON* vocab = cJSON_Parse(vocab_file);
+    if (!vocab){
+        printf("Failed to parse vocabulary.\n");
+        return 1;
+    }
+    if (!cJSON_IsArray(vocab)){
+        printf("Vocabulary is corrutped.\n");
+        return 1;
+    }
+    printf("Parsed vocabulary.\n");
+    long long timer_ = timer();
+    printf("Computing id to token table...\n");
+    
+    int vocab_len = cJSON_GetArraySize(vocab);
+    int vocab_toksize = 0;
+    int* vocab_per_toksize = NULL;
+    bool* where_gap = NULL;
+    int vocab_per_toksize_len = 0;
+    int where_gap_len = 0;
+    int gap_size = 0;
+    int lastId = -1;  // Start from -1 to allow 0 as first ID
+    int cursor = 0;
+    int padlen = strlen("PAD_NO_TOK_HERE") + 1;
+    char* padtok = malloc(padlen);
+    if (!padtok){
+        printf("Failed to allocate memory to compute id to token table...\n");
+        return 1;
+    }
+    strcpy(padtok, "PAD_NO_TOK_HERE");
+
+    cJSON* item = vocab->child;
+    int index = 0;
+
+    while (item != NULL){
+        if (!cJSON_IsArray(item) || cJSON_GetArraySize(item) != 2) {
+            printf("Vocabulary item %d/%d is corrupted.\n", index + 1, vocab_len);
+            return 1;
+        }
+
+        cJSON* item_elem_a = item->child; // string
+        cJSON* item_elem_b = item_elem_a->next; // int ID
+
+        if (!cJSON_IsString(item_elem_a) || !cJSON_IsNumber(item_elem_b)) {
+            printf("Vocabulary item %d/%d is corrupted.\n", index + 1, vocab_len);
+            return 1;
+        }
+
+        int item_strlen = strlen(item_elem_a->valuestring) + 1; // +1 for null terminator
+
+        // Grow vocab_per_toksize array
+        vocab_per_toksize = realloc(vocab_per_toksize, (vocab_per_toksize_len + 1) * sizeof(int));
+        if (!vocab_per_toksize) {
+            printf("Failed to allocate memory for vocab_per_toksize.\n");
+            return 1;
+        }
+        vocab_per_toksize[vocab_per_toksize_len++] = item_strlen;
+
+        vocab_toksize += item_strlen;
+
+        int current_id = (int)(item_elem_b->valuedouble);
+
+        // Fill any gaps between lastId and current_id
+        while (lastId + 1 < current_id) {
+            where_gap = realloc(where_gap, (where_gap_len + 1) * sizeof(bool));
+            if (!where_gap) {
+                printf("Failed to allocate memory for where_gap.\n");
+                return 1;
+            }
+            where_gap[where_gap_len++] = true;  // there's a gap here
+            lastId++;
+            gap_size++;
+            cursor++;
+        }
+
+        // Mark current ID as non-gap
+        where_gap = realloc(where_gap, (where_gap_len + 1) * sizeof(bool));
+        if (!where_gap) {
+            printf("Failed to allocate memory for where_gap.\n");
+            return 1;
+        }
+        where_gap[where_gap_len++] = false;
+
+        lastId = current_id;
+        cursor++;
+        item = item->next;
+        index++;
+    }
+    char** id_to_tok = malloc((gap_size + vocab_len) * sizeof(char*));
+    if (!id_to_tok){
+        printf("Failed memory allocation to compute id to token table.\n");
+        return 1;
+    }
+    int vocab_index = 0;
+    cJSON* item_outer = vocab->child;
+    char* item_ = NULL;
+    for (int index = 0; index < gap_size + vocab_len; index++){
+        if (where_gap[index] == false){
+            item_ = item_outer->child->valuestring;
+            id_to_tok[index] = malloc(vocab_per_toksize[vocab_index]);
+            if (!id_to_tok[index]){
+                printf("Failed memory allocation to compute id to token table.\n");
+                return 1;
+            }
+            strcpy(id_to_tok[index], item_);
+            item_outer = item_outer->next;
+            vocab_index++;
+        }
+        else{
+            id_to_tok[index] = padtok;
+        }
+    }
+    printf("Computed id to token table in %lldms.\n", timer_end(timer_));
+    printf("Computing token to id data...\n");
+    timer_ = timer();
+
+    typedef struct { //I have joined the dark side of structs.
+        char* token;
+        int id;
+    } TokenEntry;
+
+    TokenEntry* token_to_id_tokensort = malloc((gap_size + vocab_len) * sizeof(TokenEntry));
+
+    for (int index = 0; index < gap_size + vocab_len; index++){
+        token_to_id_tokensort[index].token = id_to_tok[index];
+        token_to_id_tokensort[index].id = index;
+    }
+    
+    int cmp_tokens(const void* a, const void* b) {
+        return strcmp(((TokenEntry*)a)->token, ((TokenEntry*)b)->token);
+    }
+
+    qsort(token_to_id_tokensort, vocab_len + gap_size, sizeof(TokenEntry), cmp_tokens);
+    
+    free(vocab_per_toksize);
+    free(where_gap);
+    printf("Computed token to id data in %lldms.\n", timer_end(timer_));
+
+    int token_to_id(char* tok) { //binary search bruh
+        int left = 0;
+        int right = (vocab_len + gap_size) - 1;
+
+        while (left <= right) {
+            int mid = (left + right) / 2;
+            int cmp = strcmp(tok, token_to_id_tokensort[mid].token);
+
+            if (cmp == 0) {
+                return token_to_id_tokensort[mid].id;
+            }
+
+            if (cmp < 0) {
+                right = mid - 1;
+            } 
+            else {
+                left = mid + 1;
+            }
+        }
+
+        return -1;
+    }
+
+    char* id_to_token(int id){
+        if (id > gap_size + vocab_len){
+            return NULL;
+        }
+        else{
+            if (id < 0){
+                return NULL;
+            }
+            else{
+                char* res = id_to_tok[id];
+                if (strcmp(res, "PAD_NO_TOK_HERE") == 0){
+                    return NULL;
+                }
+                else{
+                    return res;
+                }
+            }
+        }
+    }
+
+    //Chat we cookin
+
+    return 0;
+}
