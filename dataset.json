@@ -1,0 +1,42 @@
+[
+    {
+        "inputs": ["Hey!"],
+        "outputs": ["Hey, how are you?"]
+    },
+    {
+        "inputs": ["Hey there!"],
+        "outputs": ["Hey there, how are you?"]
+    },
+    {
+        "inputs": ["Hey man!"],
+        "outputs": ["Hey man, how are you?"]
+    },
+    {
+        "inputs": ["Hey friend!"],
+        "outputs": ["Hey friend, how are you?"]
+    },
+    {
+        "inputs": ["Hey stranger!"],
+        "outputs": ["Hey stranger, how are you?"]
+    },
+    {
+        "inputs": ["Hey!"],
+        "outputs": ["Hey, how are you?"]
+    },
+    {
+        "inputs": ["Hey there!"],
+        "outputs": ["Hey there, how are you?"]
+    },
+    {
+        "inputs": ["Hey!"],
+        "outputs": ["Hey, how are you?"]
+    },
+    {
+        "inputs": ["Hey you!"],
+        "outputs": ["Hey you, how are you?"]
+    },
+    {
+        "inputs": ["Hey!"],
+        "outputs": ["Hey, how are you?"]
+    }
+]

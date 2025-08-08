@@ -3,8 +3,8 @@
 #include <stdbool.h>
 #include <time.h>
 #include <string.h>
+#include <stdarg.h>
 #include <ctype.h>
-#include <math.h>
 
 #include "cJSON.h"
 #include "cJSON.c"
@@ -12,8 +12,31 @@
 #ifdef _WIN32 //windows compability is pain ;(
 #include <windows.h>
 #include <conio.h>
+#include <tlhelp32.h>
 
-long long time_ms() {
+unsigned long getPid(){
+    return (unsigned long)GetCurrentProcessId();
+}
+
+unsigned long getParentPid(){
+    DWORD pid = GetCurrentProcessId();
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+
+    PROCESSENTRY32 pe;
+    pe.dwSize = sizeof(pe);
+    if (!Process32First(snap, &pe)) { CloseHandle(snap); return 0; }
+
+    DWORD ppid = 0;
+    do {
+        if (pe.th32ProcessID == pid) { ppid = pe.th32ParentProcessID; break; }
+    } while (Process32Next(snap, &pe));
+
+    CloseHandle(snap);
+    return (unsigned long)ppid;
+}
+
+long long time_ms(){
     FILETIME ft;
     GetSystemTimeAsFileTime(&ft);
     ULARGE_INTEGER uli;
@@ -22,7 +45,7 @@ long long time_ms() {
     return (long long)(uli.QuadPart / 10000);
 }
 
-char* input_with_timeout(char* qry, int timeout_ms) {
+char* input_with_timeout(char* qry, int timeout_ms){
     printf("%s", qry);
     fflush(stdout);
     
@@ -37,7 +60,9 @@ char* input_with_timeout(char* qry, int timeout_ms) {
     
     while (pos < 4095) {
         if (_kbhit()) {
-            char c = _getch();
+            int k = _getch();
+            if (k == 0 || k == 0xE0) { (void)_getch(); continue; } // swallow special keys
+            char c = (char)k;
             
             if (c == '\r' || c == '\n') {
                 putchar('\n');
@@ -64,18 +89,52 @@ char* input_with_timeout(char* qry, int timeout_ms) {
     return buff;
 }
 
+void* smalloc(size_t size, const char* sharename){
+    HANDLE hMap = CreateFileMappingA(
+        INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
+        (DWORD)((unsigned long long)size >> 32),
+        (DWORD)(size & 0xFFFFFFFF),
+        sharename
+    );
+    if (!hMap) return NULL;
+
+    void* p = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, size);
+    CloseHandle(hMap); // view keeps mapping alive
+    return p;
+}
+
+void* rmalloc(const char* sharename){
+    HANDLE hMap = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, sharename);
+    if (!hMap) return NULL;
+
+    /* 0 size maps the entire section on Windows */
+    void* p = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+    CloseHandle(hMap);
+    return p;
+}
+
 #else
 #include <sys/time.h>
 #include <sys/select.h>
 #include <unistd.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 
-long long time_ms() {
+unsigned long getPid(){
+    return (unsigned long)getpid();
+}
+unsigned long getParentPid(){
+    return (unsigned long)getppid();
+}
+
+long long time_ms(){
     struct timeval tv;
     gettimeofday(&tv, NULL);
     return (long long)(tv.tv_sec) * 1000 + (tv.tv_usec / 1000);
 }
 
-char* input_with_timeout(char* qry, int timeout_ms) {
+char* input_with_timeout(char* qry, int timeout_ms){
     printf("%s", qry);
     fflush(stdout);
     
@@ -122,7 +181,47 @@ char* input_with_timeout(char* qry, int timeout_ms) {
     free(buff);
     return NULL;
 }
+
+void* smalloc(size_t size, const char* sharename){
+    int fd = shm_open(sharename, O_CREAT | O_RDWR, 0666);
+    if (fd == -1) return NULL;
+
+    if (ftruncate(fd, (off_t)size) == -1) {
+        close(fd);
+        shm_unlink(sharename);
+        return NULL;
+    }
+
+    void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) {
+        shm_unlink(sharename);
+        return NULL;
+    }
+    return p;
+}
+
+void* rmalloc(const char* sharename){
+    int fd = shm_open(sharename, O_RDWR, 0666);
+    if (fd == -1) return NULL;
+
+    struct stat st;
+    if (fstat(fd, &st) == -1) {
+        close(fd);
+        return NULL;
+    }
+    size_t size = (size_t)st.st_size;
+
+    void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) return NULL;
+    return p;
+}
 #endif
+
+float sqrtf(float to){
+    return __builtin_sqrtf(to);
+}
 
 char* input(char* qry){
     printf("%s", qry);
@@ -144,8 +243,6 @@ char* input(char* qry){
         return NULL;
     }
 }
-
-const char* cli_arrow = "›";
 
 void help(char* issue){
     if (issue == NULL){
@@ -1145,7 +1242,7 @@ int main(int argc, char** argv){
     }
 
     cJSON* biasesinitrange_raw = cJSON_GetObjectItem(config, "biasesinitrange");
-    double* biasesinitrange = NULL;
+    float* biasesinitrange = NULL;
 
     if (!cJSON_IsArray(biasesinitrange_raw)){
         if (new){
@@ -1197,8 +1294,8 @@ int main(int argc, char** argv){
                     printf("Failed memory allocation to parse config.\n");
                     return 1;
                 }
-                biasesinitrange[0] = elem_a->valuedouble;
-                biasesinitrange[1] = elem_b->valuedouble;
+                biasesinitrange[0] = (float)(elem_a->valuedouble);
+                biasesinitrange[1] = (float)(elem_b->valuedouble);
             }
             else{
                 printf("[Config] [Info] Ignoring biasesinitrange as you are loading a model, not creating a new one.\n");
@@ -1207,7 +1304,7 @@ int main(int argc, char** argv){
     }
 
     cJSON* embeddinginitrange_raw = cJSON_GetObjectItem(config, "embeddinginitrange");
-    double* embeddinginitrange = NULL;
+    float* embeddinginitrange = NULL;
 
     if (!cJSON_IsArray(embeddinginitrange_raw)){
         if (new){
@@ -1259,14 +1356,33 @@ int main(int argc, char** argv){
                     printf("Failed memory allocation to parse config.\n");
                     return 1;
                 }
-                embeddinginitrange[0] = elem_a->valuedouble;
-                embeddinginitrange[1] = elem_b->valuedouble;
+                embeddinginitrange[0] = (float)(elem_a->valuedouble);
+                embeddinginitrange[1] = (float)(elem_b->valuedouble);
             }
             else{
                 printf("[Config] [Info] Ignoring embeddinginitrange as you are loading a model, not creating a new one.\n");
             }
         }
     }
+
+    float* he_init(float fan_in){
+        float* returns = malloc(2 * sizeof(float));
+        if (!returns){
+            printf("Failed memory allocation for weights initalisation range calculation.\n");
+            return NULL;
+        }
+        float range = sqrtf(2.0f / fan_in);
+        returns[0] = -range;
+        returns[1] = range;
+        return returns;
+    }
+
+    printf("Calculating weight initalisation range with he init...\n");
+    float* weightsinitrange = he_init(embeddingSize);
+    if (!weightsinitrange){
+        return 1;
+    }
+    printf("Calculated weight initalisation range with he init.\n");
 
     printf("Reading vocabulary file (vocabulary.json)...\n");
     char* vocab_file = read_file("vocabulary.json");
@@ -1456,7 +1572,475 @@ int main(int argc, char** argv){
         }
     }
 
+    int* tokenize(char* str_) {
+        int len = strlen(str_);
+        if (len == 0) return NULL;
+
+        char* str = malloc(len + 1);
+        if (!str) {
+            printf("Failed to allocate memory to tokenize text.\n");
+            return NULL;
+        }
+        strcpy(str, str_);
+
+        int* tokenized = NULL;
+        int tokenized_len = 0;
+        int consumed = 0;
+
+        while (consumed < len) {
+            int cursor = len - consumed;
+            int found = 0;
+
+            while (cursor > 0) {
+                char saved = str[consumed + cursor];
+                str[consumed + cursor] = '\0';
+
+                int tok_id = token_to_id(str + consumed);
+
+                str[consumed + cursor] = saved;
+
+                if (tok_id != -1) {
+                    int* new_arr = realloc(tokenized, (tokenized_len + 2) * sizeof(int));
+                    if (!new_arr) {
+                        printf("Failed to allocate memory to tokenize text.\n");
+                        free(tokenized);
+                        free(str);
+                        return NULL;
+                    }
+                    tokenized = new_arr;
+                    tokenized_len++;
+                    tokenized[tokenized_len] = tok_id;
+                    consumed += cursor;
+                    found = 1;
+                    break;
+                }
+                cursor--;
+            }
+
+            if (!found) {
+                free(tokenized);
+                free(str);
+                return NULL;
+            }
+        }
+
+        free(str);
+
+        if (tokenized) {
+            tokenized[0] = tokenized_len;
+        }
+
+        return tokenized;
+    }
+
+    float temperature = 0.7;
+    int step_num = 0;
+
+    printf("Initalizing model...\n");
+    long long timer___ = timer();
+    printf("Initalizing layers...\n");
+    timer_ = timer();
+
+    float random_range(float* ran){
+        float min = ran[0];
+        float max = ran[1];
+        return min + ((float)rand() / (float)RAND_MAX) * (max - min);
+    }
+
+    typedef struct {
+        struct {
+            float* normalize_1;
+            struct {
+                struct {
+                    float* query;
+                    float* key;
+                    float* value;
+                } *heads;
+                float* output;
+            } attention;
+            float* normalize_2;
+            struct {
+                float* grow;
+                float* shrink;
+            } feed_forward;
+        } weights;
+        struct {
+            float* normalize_1;
+            struct {
+                struct {
+                    float* query;
+                    float* key;
+                    float* value;
+                } *heads;
+                float* output;
+            } attention;
+            float* normalize_2;
+            struct {
+                float* grow;
+                float* shrink;
+            } feed_forward;
+        } biases;
+    } layer;
+
+    char* mname(const char* fmt, ...) {
+        if (!fmt) return NULL;
+
+        char pidbuf[32];
+        snprintf(pidbuf, sizeof pidbuf, "%lu", getPid());
+
+        va_list ap;
+        va_start(ap, fmt);
+
+        // compute formatted length (excl. '\0')
+        int needed;
+#if defined(_WIN32)
+        va_list ap1; va_copy(ap1, ap);
+        needed = _vscprintf(fmt, ap1);
+        va_end(ap1);
+#else
+        va_list ap1; va_copy(ap1, ap);
+        needed = vsnprintf(NULL, 0, fmt, ap1);
+        va_end(ap1);
+#endif
+        if (needed < 0) { va_end(ap); return NULL; }
+
+        size_t prefix_len = strlen(pidbuf) + 2; // '/' and '_'
+        size_t total = prefix_len + (size_t)needed + 1;
+
+        char* out = malloc(total);
+        if (!out) {
+            printf("Failed to allocate memory to generate shared memory name.\n");
+            va_end(ap);
+            return NULL;
+        }
+
+        int wrote = snprintf(out, total, "/%s_", pidbuf);
+        (void)vsnprintf(out + wrote, total - (size_t)wrote, fmt, ap);
+        va_end(ap);
+        return out;
+    }
+
     //Chat we cookin
+    layer* layers = malloc(layersAmount * sizeof(layer));
+    if (!layers){
+        printf("Failed to allocate memory to initalize layers.\n");
+        return 1;
+    }
+    for (int index = 0; index < layersAmount; index++){
+        printf("Initalizing layer %d/%d...\n", index + 1, layersAmount);
+        long long timer__ = timer();
+        char* name = mname("layers[%d].weights.normalize_1", index);
+        if (!name){
+            return 1;
+        }
+        layers[index].weights.normalize_1 = smalloc(embeddingSize * 3 * sizeof(float), name);
+        free(name);
+        name = mname("layers[%d].weights.normalize_2", index);
+        if (!name){
+            return 1;
+        }
+        layers[index].weights.normalize_2 = smalloc(embeddingSize * 3 * sizeof(float), name);
+        free(name);
+        name = mname("layers[%d].biases.normalize_1", index);
+        if (!name){
+            return 1;
+        }
+        layers[index].biases.normalize_1 = smalloc(embeddingSize * 3 * sizeof(float), name);
+        free(name);
+        name = mname("layers[%d].biases.normalize_2", index);
+        if (!name){
+            return 1;
+        }
+        layers[index].biases.normalize_2 = smalloc(embeddingSize * 3 * sizeof(float), name);
+        layers[index].weights.attention.heads = malloc(heads * sizeof(*layers[index].weights.attention.heads));
+        layers[index].biases.attention.heads = malloc(heads * sizeof(*layers[index].biases.attention.heads));
+        free(name);
+        name = mname("layers[%d].weights.attention.output", index);
+        if (!name){
+            return 1;
+        }
+        layers[index].weights.attention.output = smalloc(embeddingSize * (embeddingSize * heads) * 3 * sizeof(float), name);
+        free(name);
+        name = mname("layers[%d].biases.attention.output", index);
+        if (!name){
+            return 1;
+        }
+        layers[index].biases.attention.output = smalloc(embeddingSize * 3 * sizeof(float), name);
+        free(name);
+        name = mname("layers[%d].weights.feed_forward.grow", index);
+        if (!name){
+            return 1;
+        }
+        layers[index].weights.feed_forward.grow = smalloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), name);
+        free(name);
+        name = mname("layers[%d].weights.feed_forward.shrink", index);
+        if (!name){
+            return 1;
+        }
+        layers[index].weights.feed_forward.shrink = smalloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), name);
+        free(name);
+        name = mname("layers[%d].biases.feed_forward.grow", index);
+        if (!name){
+            return 1;
+        }
+        layers[index].biases.feed_forward.grow = smalloc((embeddingSize * 4) * 3 * sizeof(float), name);
+        free(name);
+        name = mname("layers[%d].biases.feed_forward.shrink", index);
+        if (!name){
+            return 1;
+        }
+        layers[index].biases.feed_forward.shrink = smalloc(embeddingSize * 3 * sizeof(float), name);
+        free(name);
+
+        if (!layers[index].weights.normalize_1){
+            printf("Failed to allocate memory to initalize layers.\n");
+            return 1;
+        }
+        if (!layers[index].weights.normalize_2){
+            printf("Failed to allocate memory to initalize layers.\n");
+            return 1;
+        }
+        if (!layers[index].biases.normalize_1){
+            printf("Failed to allocate memory to initalize layers.\n");
+            return 1;
+        }
+        if (!layers[index].biases.normalize_2){
+            printf("Failed to allocate memory to initalize layers.\n");
+            return 1;
+        }
+        if (!layers[index].weights.attention.heads){
+            printf("Failed to allocate memory to initalize layers.\n");
+            return 1;
+        }
+        if (!layers[index].biases.attention.heads){
+            printf("Failed to allocate memory to initalize layers.\n");
+            return 1;
+        }
+        if (!layers[index].weights.attention.output){
+            printf("Failed to allocate memory to initalize layers.\n");
+            return 1;
+        }
+        if (!layers[index].biases.attention.output){
+            printf("Failed to allocate memory to initalize layers.\n");
+            return 1;
+        }
+        if (!layers[index].weights.feed_forward.grow){
+            printf("Failed to allocate memory to initalize layers.\n");
+            return 1;
+        }
+        if (!layers[index].weights.feed_forward.shrink){
+            printf("Failed to allocate memory to initalize layers.\n");
+            return 1;
+        }
+        if (!layers[index].biases.feed_forward.grow){
+            printf("Failed to allocate memory to initalize layers.\n");
+            return 1;
+        }
+        if (!layers[index].biases.feed_forward.shrink){
+            printf("Failed to allocate memory to initalize layers.\n");
+            return 1;
+        }
+
+        for (int subindex = 0; subindex < embeddingSize; subindex++){
+            layers[index].weights.normalize_1[subindex * 3] = random_range(weightsinitrange);
+            layers[index].weights.normalize_2[subindex * 3] = random_range(weightsinitrange);
+            layers[index].biases.normalize_1[subindex * 3] = random_range(biasesinitrange);
+            layers[index].biases.normalize_2[subindex * 3] = random_range(biasesinitrange);
+        }
+
+        for (int subindex = 0; subindex < heads; subindex++){
+            name = mname("layers[%d].weights.attention.heads[%d].query", index, subindex);
+            if (!name){
+                return 1;
+            }
+            layers[index].weights.attention.heads[subindex].query = smalloc(embeddingSize * embeddingSize * 3 * sizeof(float), name);
+            free(name);
+            name = mname("layers[%d].weights.attention.heads[%d].key", index, subindex);
+            if (!name){
+                return 1;
+            }
+            layers[index].weights.attention.heads[subindex].key = smalloc(embeddingSize * embeddingSize * 3 * sizeof(float), name);
+            free(name);
+            name = mname("layers[%d].weights.attention.heads[%d].value", index, subindex);
+            if (!name){
+                return 1;
+            }
+            layers[index].weights.attention.heads[subindex].value = smalloc(embeddingSize * embeddingSize * 3 * sizeof(float), name);
+            
+            free(name);
+            name = mname("layers[%d].biases.attention.heads[%d].query", index, subindex);
+            if (!name){
+                return 1;
+            }
+            layers[index].biases.attention.heads[subindex].query = smalloc(embeddingSize * 3 * sizeof(float), name);
+            free(name);
+            name = mname("layers[%d].biases.attention.heads[%d].key", index, subindex);
+            if (!name){
+                return 1;
+            }
+            layers[index].biases.attention.heads[subindex].key = smalloc(embeddingSize * 3 * sizeof(float), name);
+            free(name);
+            name = mname("layers[%d].biases.attention.heads[%d].value", index, subindex);
+            if (!name){
+                return 1;
+            }
+            layers[index].biases.attention.heads[subindex].value = smalloc(embeddingSize * 3 * sizeof(float), name);
+            free(name);
+
+            if (!layers[index].weights.attention.heads[subindex].query){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+            if (!layers[index].weights.attention.heads[subindex].key){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+            if (!layers[index].weights.attention.heads[subindex].value){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+
+            if (!layers[index].biases.attention.heads[subindex].query){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+            if (!layers[index].biases.attention.heads[subindex].key){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+            if (!layers[index].biases.attention.heads[subindex].value){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+
+            for (int subindex_ = 0; subindex_ < embeddingSize * embeddingSize; subindex_++){
+                layers[index].weights.attention.heads[subindex].query[subindex_ * 3] = random_range(weightsinitrange);
+                layers[index].weights.attention.heads[subindex].key[subindex_ * 3] = random_range(weightsinitrange);
+                layers[index].weights.attention.heads[subindex].value[subindex_ * 3] = random_range(weightsinitrange);
+            }
+
+            for (int subindex_ = 0; subindex_ < embeddingSize; subindex_++){
+                layers[index].biases.attention.heads[subindex].query[subindex_ * 3] = random_range(biasesinitrange);
+                layers[index].biases.attention.heads[subindex].key[subindex_ * 3] = random_range(biasesinitrange);
+                layers[index].biases.attention.heads[subindex].value[subindex_ * 3] = random_range(biasesinitrange);
+            }
+        }
+
+        for (int subindex = 0; subindex < embeddingSize * (embeddingSize * heads); subindex++){
+            layers[index].weights.attention.output[subindex * 3] = random_range(weightsinitrange);
+        }
+
+        for (int subindex = 0; subindex < embeddingSize; subindex++){
+            layers[index].biases.attention.output[subindex * 3] = random_range(biasesinitrange);
+        }
+
+        for (int subindex = 0; subindex < embeddingSize * (embeddingSize * 4); subindex++){
+            layers[index].weights.feed_forward.grow[subindex * 3] = random_range(weightsinitrange);
+        }
+
+        for (int subindex = 0; subindex < embeddingSize * 4; subindex++){
+            layers[index].biases.feed_forward.grow[subindex * 3] = random_range(biasesinitrange);
+        }
+
+        for (int subindex = 0; subindex < (embeddingSize * 4) * embeddingSize; subindex++){
+            layers[index].weights.feed_forward.shrink[subindex * 3] = random_range(weightsinitrange);
+        }
+
+        for (int subindex = 0; subindex < embeddingSize; subindex++){
+            layers[index].biases.feed_forward.shrink[subindex * 3] = random_range(biasesinitrange);
+        }
+
+        printf("Initalized layer %d/%d in %lldms.\n", index + 1, layersAmount, timer_end(timer__));
+    }
+
+    printf("Initalized layers in %lldms\n", timer_end(timer_));
+
+    printf("Initalizing embeddings...\n");
+    timer_ = timer();
+    float** embeddings = malloc((vocab_len + gap_size) * sizeof(float*));
+    if (!embeddings){
+        printf("Failed to allocate memory to initalize embeddings.\n");
+        return 1;
+    }
+
+    for (int index = 0; index < vocab_len + gap_size; index++){
+        if (strcmp(id_to_tok[index], "PAD_NO_TOK_HERE") == 0){
+            continue;
+        }
+        char* name = mname("embeddings");
+        if (!name){
+            return 1;
+        }
+        embeddings[index] = smalloc(embeddingSize * 3 * sizeof(float), name);
+        free(name);
+        if (!embeddings[index]){
+            printf("Failed to allocate memory to initalize embeddings.\n");
+            return 1;
+        }
+        for (int subindex = 0; subindex < embeddingSize; subindex++){
+            embeddings[index][subindex * 3] = random_range(embeddinginitrange);
+        }
+    }
+
+    printf("Initalized embeddings in %lldms.\n", timer_end(timer_));
+    
+    printf("Initalizing vocabulary projection weights and biases.\n");
+    timer_ = timer();
+    typedef struct {
+        float* weights;
+        float* biases;
+    } vp;
+
+    vp vocab_projection;
+    
+    char* name = mname("vocab_projection.weights");
+    if (!name){
+        return 1;
+    }
+    vocab_projection.weights = smalloc(vocab_len * embeddingSize * 3 * sizeof(float), name);
+    free(name);
+    name = mname("vocab_projection.biases");
+    if (!name){
+        return 1;
+    }
+    vocab_projection.biases = smalloc(vocab_len * 3, name);
+    free(name);
+    
+    if (!vocab_projection.weights){
+        printf("Failed memory allocation to initalize vocabulary projection.\n");
+        return 1;
+    }
+    if (!vocab_projection.biases){
+        printf("Failed memory allocation to initalize vocabulary projection.\n");
+        return 1;
+    }
+
+    for (int index = 0; index < vocab_len * embeddingSize; index++){
+        vocab_projection.weights[index * 3] = random_range(weightsinitrange);
+    }
+    for (int index = 0; index < vocab_len; index++){
+        vocab_projection.biases[index * 3] = random_range(biasesinitrange);
+    }
+
+    printf("Initalized vocabulary projection weights and biases in %lldms.\n", timer_end(timer_));
+    printf("Initalized model in %lldms.\n", timer_end(timer___));
+
+    printf("Enter strings to tokenize:\n");
+    while (true){
+        char* in = input("› ");
+        int* tokens = tokenize(in);
+        
+        printf("Token ids: ");
+        for (int index = 1; index < tokens[0] + 1; index++){
+            printf("%d ", tokens[index]);
+        }
+        printf("\n");
+        printf("Tokens: ");
+        for (int index = 1; index < tokens[0] + 1; index++){
+            printf("\"%s\" ", id_to_token(tokens[index]));
+        }
+        printf("\n");
+    }
 
     return 0;
 }
