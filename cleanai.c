@@ -6,8 +6,11 @@
 #include <stdarg.h>
 #include <ctype.h>
 
-#include "cJSON.h"
-#include "cJSON.c"
+#include "libs/cJSON.h"
+#include "libs/cJSON.c"
+
+#include "libs/miniz.h"
+#include "libs/miniz.c"
 
 #ifdef _WIN32 //windows compability is pain ;(
 #include <windows.h>
@@ -1377,12 +1380,15 @@ int main(int argc, char** argv){
         return returns;
     }
 
-    printf("Calculating weight initalisation range with he init...\n");
-    float* weightsinitrange = he_init(embeddingSize);
-    if (!weightsinitrange){
-        return 1;
+    float* weightsinitrange = NULL;
+    if (do_pretrain || do_train){
+        printf("Calculating weight initalisation range with he init...\n");
+        weightsinitrange = he_init(embeddingSize);
+        if (!weightsinitrange){
+            return 1;
+        }
+        printf("Calculated weight initalisation range with he init.\n");
     }
-    printf("Calculated weight initalisation range with he init.\n");
 
     printf("Reading vocabulary file (vocabulary.json)...\n");
     char* vocab_file = read_file("vocabulary.json");
@@ -1635,6 +1641,17 @@ int main(int argc, char** argv){
 
     float temperature = 0.7;
     int step_num = 0;
+    typedef struct{
+        float beta1;
+        float beta2;
+        float epsilon;
+        int t;
+    } ap;
+    ap adam_params;
+    adam_params.beta1 = 0.9;
+    adam_params.beta2 = 0.98;
+    adam_params.epsilon = 1e-9;
+    adam_params.t = 0;
 
     printf("Initalizing model...\n");
     long long timer___ = timer();
@@ -1682,6 +1699,11 @@ int main(int argc, char** argv){
         } biases;
     } layer;
 
+    typedef struct {
+        float* weights;
+        float* biases;
+    } vp;
+
     char* mname(const char* fmt, ...) {
         if (!fmt) return NULL;
 
@@ -1721,309 +1743,950 @@ int main(int argc, char** argv){
     }
 
     //Chat we cookin
-    layer* layers = malloc(layersAmount * sizeof(layer));
-    if (!layers){
-        printf("Failed to allocate memory to initalize layers.\n");
-        return 1;
-    }
-    for (int index = 0; index < layersAmount; index++){
-        printf("Initalizing layer %d/%d...\n", index + 1, layersAmount);
-        long long timer__ = timer();
-        char* name = mname("layers[%d].weights.normalize_1", index);
-        if (!name){
-            return 1;
-        }
-        layers[index].weights.normalize_1 = smalloc(embeddingSize * 3 * sizeof(float), name);
-        free(name);
-        name = mname("layers[%d].weights.normalize_2", index);
-        if (!name){
-            return 1;
-        }
-        layers[index].weights.normalize_2 = smalloc(embeddingSize * 3 * sizeof(float), name);
-        free(name);
-        name = mname("layers[%d].biases.normalize_1", index);
-        if (!name){
-            return 1;
-        }
-        layers[index].biases.normalize_1 = smalloc(embeddingSize * 3 * sizeof(float), name);
-        free(name);
-        name = mname("layers[%d].biases.normalize_2", index);
-        if (!name){
-            return 1;
-        }
-        layers[index].biases.normalize_2 = smalloc(embeddingSize * 3 * sizeof(float), name);
-        layers[index].weights.attention.heads = malloc(heads * sizeof(*layers[index].weights.attention.heads));
-        layers[index].biases.attention.heads = malloc(heads * sizeof(*layers[index].biases.attention.heads));
-        free(name);
-        name = mname("layers[%d].weights.attention.output", index);
-        if (!name){
-            return 1;
-        }
-        layers[index].weights.attention.output = smalloc(embeddingSize * (embeddingSize * heads) * 3 * sizeof(float), name);
-        free(name);
-        name = mname("layers[%d].biases.attention.output", index);
-        if (!name){
-            return 1;
-        }
-        layers[index].biases.attention.output = smalloc(embeddingSize * 3 * sizeof(float), name);
-        free(name);
-        name = mname("layers[%d].weights.feed_forward.grow", index);
-        if (!name){
-            return 1;
-        }
-        layers[index].weights.feed_forward.grow = smalloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), name);
-        free(name);
-        name = mname("layers[%d].weights.feed_forward.shrink", index);
-        if (!name){
-            return 1;
-        }
-        layers[index].weights.feed_forward.shrink = smalloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), name);
-        free(name);
-        name = mname("layers[%d].biases.feed_forward.grow", index);
-        if (!name){
-            return 1;
-        }
-        layers[index].biases.feed_forward.grow = smalloc((embeddingSize * 4) * 3 * sizeof(float), name);
-        free(name);
-        name = mname("layers[%d].biases.feed_forward.shrink", index);
-        if (!name){
-            return 1;
-        }
-        layers[index].biases.feed_forward.shrink = smalloc(embeddingSize * 3 * sizeof(float), name);
-        free(name);
-
-        if (!layers[index].weights.normalize_1){
+    if (new){
+        layer* layers = malloc(layersAmount * sizeof(layer));
+        if (!layers){
             printf("Failed to allocate memory to initalize layers.\n");
             return 1;
         }
-        if (!layers[index].weights.normalize_2){
-            printf("Failed to allocate memory to initalize layers.\n");
-            return 1;
-        }
-        if (!layers[index].biases.normalize_1){
-            printf("Failed to allocate memory to initalize layers.\n");
-            return 1;
-        }
-        if (!layers[index].biases.normalize_2){
-            printf("Failed to allocate memory to initalize layers.\n");
-            return 1;
-        }
-        if (!layers[index].weights.attention.heads){
-            printf("Failed to allocate memory to initalize layers.\n");
-            return 1;
-        }
-        if (!layers[index].biases.attention.heads){
-            printf("Failed to allocate memory to initalize layers.\n");
-            return 1;
-        }
-        if (!layers[index].weights.attention.output){
-            printf("Failed to allocate memory to initalize layers.\n");
-            return 1;
-        }
-        if (!layers[index].biases.attention.output){
-            printf("Failed to allocate memory to initalize layers.\n");
-            return 1;
-        }
-        if (!layers[index].weights.feed_forward.grow){
-            printf("Failed to allocate memory to initalize layers.\n");
-            return 1;
-        }
-        if (!layers[index].weights.feed_forward.shrink){
-            printf("Failed to allocate memory to initalize layers.\n");
-            return 1;
-        }
-        if (!layers[index].biases.feed_forward.grow){
-            printf("Failed to allocate memory to initalize layers.\n");
-            return 1;
-        }
-        if (!layers[index].biases.feed_forward.shrink){
-            printf("Failed to allocate memory to initalize layers.\n");
-            return 1;
-        }
-
-        for (int subindex = 0; subindex < embeddingSize; subindex++){
-            layers[index].weights.normalize_1[subindex * 3] = random_range(weightsinitrange);
-            layers[index].weights.normalize_2[subindex * 3] = random_range(weightsinitrange);
-            layers[index].biases.normalize_1[subindex * 3] = random_range(biasesinitrange);
-            layers[index].biases.normalize_2[subindex * 3] = random_range(biasesinitrange);
-        }
-
-        for (int subindex = 0; subindex < heads; subindex++){
-            name = mname("layers[%d].weights.attention.heads[%d].query", index, subindex);
+        for (int index = 0; index < layersAmount; index++){
+            printf("Initalizing layer %d/%d...\n", index + 1, layersAmount);
+            long long timer__ = timer();
+            char* name = mname("layers[%d].weights.normalize_1", index);
             if (!name){
                 return 1;
             }
-            layers[index].weights.attention.heads[subindex].query = smalloc(embeddingSize * embeddingSize * 3 * sizeof(float), name);
+            layers[index].weights.normalize_1 = smalloc(embeddingSize * 3 * sizeof(float), name);
             free(name);
-            name = mname("layers[%d].weights.attention.heads[%d].key", index, subindex);
+            name = mname("layers[%d].weights.normalize_2", index);
             if (!name){
                 return 1;
             }
-            layers[index].weights.attention.heads[subindex].key = smalloc(embeddingSize * embeddingSize * 3 * sizeof(float), name);
+            layers[index].weights.normalize_2 = smalloc(embeddingSize * 3 * sizeof(float), name);
             free(name);
-            name = mname("layers[%d].weights.attention.heads[%d].value", index, subindex);
+            name = mname("layers[%d].biases.normalize_1", index);
             if (!name){
                 return 1;
             }
-            layers[index].weights.attention.heads[subindex].value = smalloc(embeddingSize * embeddingSize * 3 * sizeof(float), name);
-            
+            layers[index].biases.normalize_1 = smalloc(embeddingSize * 3 * sizeof(float), name);
             free(name);
-            name = mname("layers[%d].biases.attention.heads[%d].query", index, subindex);
+            name = mname("layers[%d].biases.normalize_2", index);
             if (!name){
                 return 1;
             }
-            layers[index].biases.attention.heads[subindex].query = smalloc(embeddingSize * 3 * sizeof(float), name);
+            layers[index].biases.normalize_2 = smalloc(embeddingSize * 3 * sizeof(float), name);
+            layers[index].weights.attention.heads = malloc(heads * sizeof(*layers[index].weights.attention.heads));
+            layers[index].biases.attention.heads = malloc(heads * sizeof(*layers[index].biases.attention.heads));
             free(name);
-            name = mname("layers[%d].biases.attention.heads[%d].key", index, subindex);
+            name = mname("layers[%d].weights.attention.output", index);
             if (!name){
                 return 1;
             }
-            layers[index].biases.attention.heads[subindex].key = smalloc(embeddingSize * 3 * sizeof(float), name);
+            layers[index].weights.attention.output = smalloc(embeddingSize * (embeddingSize * heads) * 3 * sizeof(float), name);
             free(name);
-            name = mname("layers[%d].biases.attention.heads[%d].value", index, subindex);
+            name = mname("layers[%d].biases.attention.output", index);
             if (!name){
                 return 1;
             }
-            layers[index].biases.attention.heads[subindex].value = smalloc(embeddingSize * 3 * sizeof(float), name);
+            layers[index].biases.attention.output = smalloc(embeddingSize * 3 * sizeof(float), name);
+            free(name);
+            name = mname("layers[%d].weights.feed_forward.grow", index);
+            if (!name){
+                return 1;
+            }
+            layers[index].weights.feed_forward.grow = smalloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), name);
+            free(name);
+            name = mname("layers[%d].weights.feed_forward.shrink", index);
+            if (!name){
+                return 1;
+            }
+            layers[index].weights.feed_forward.shrink = smalloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), name);
+            free(name);
+            name = mname("layers[%d].biases.feed_forward.grow", index);
+            if (!name){
+                return 1;
+            }
+            layers[index].biases.feed_forward.grow = smalloc((embeddingSize * 4) * 3 * sizeof(float), name);
+            free(name);
+            name = mname("layers[%d].biases.feed_forward.shrink", index);
+            if (!name){
+                return 1;
+            }
+            layers[index].biases.feed_forward.shrink = smalloc(embeddingSize * 3 * sizeof(float), name);
             free(name);
 
-            if (!layers[index].weights.attention.heads[subindex].query){
+            if (!layers[index].weights.normalize_1){
                 printf("Failed to allocate memory to initalize layers.\n");
                 return 1;
             }
-            if (!layers[index].weights.attention.heads[subindex].key){
+            if (!layers[index].weights.normalize_2){
                 printf("Failed to allocate memory to initalize layers.\n");
                 return 1;
             }
-            if (!layers[index].weights.attention.heads[subindex].value){
+            if (!layers[index].biases.normalize_1){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+            if (!layers[index].biases.normalize_2){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+            if (!layers[index].weights.attention.heads){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+            if (!layers[index].biases.attention.heads){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+            if (!layers[index].weights.attention.output){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+            if (!layers[index].biases.attention.output){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+            if (!layers[index].weights.feed_forward.grow){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+            if (!layers[index].weights.feed_forward.shrink){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+            if (!layers[index].biases.feed_forward.grow){
+                printf("Failed to allocate memory to initalize layers.\n");
+                return 1;
+            }
+            if (!layers[index].biases.feed_forward.shrink){
                 printf("Failed to allocate memory to initalize layers.\n");
                 return 1;
             }
 
-            if (!layers[index].biases.attention.heads[subindex].query){
-                printf("Failed to allocate memory to initalize layers.\n");
-                return 1;
-            }
-            if (!layers[index].biases.attention.heads[subindex].key){
-                printf("Failed to allocate memory to initalize layers.\n");
-                return 1;
-            }
-            if (!layers[index].biases.attention.heads[subindex].value){
-                printf("Failed to allocate memory to initalize layers.\n");
-                return 1;
+            for (int subindex = 0; subindex < embeddingSize; subindex++){
+                layers[index].weights.normalize_1[subindex * 3] = random_range(weightsinitrange);
+                layers[index].weights.normalize_2[subindex * 3] = random_range(weightsinitrange);
+                layers[index].biases.normalize_1[subindex * 3] = random_range(biasesinitrange);
+                layers[index].biases.normalize_2[subindex * 3] = random_range(biasesinitrange);
             }
 
-            for (int subindex_ = 0; subindex_ < embeddingSize * embeddingSize; subindex_++){
-                layers[index].weights.attention.heads[subindex].query[subindex_ * 3] = random_range(weightsinitrange);
-                layers[index].weights.attention.heads[subindex].key[subindex_ * 3] = random_range(weightsinitrange);
-                layers[index].weights.attention.heads[subindex].value[subindex_ * 3] = random_range(weightsinitrange);
+            for (int subindex = 0; subindex < heads; subindex++){
+                name = mname("layers[%d].weights.attention.heads[%d].query", index, subindex);
+                if (!name){
+                    return 1;
+                }
+                layers[index].weights.attention.heads[subindex].query = smalloc(embeddingSize * embeddingSize * 3 * sizeof(float), name);
+                free(name);
+                name = mname("layers[%d].weights.attention.heads[%d].key", index, subindex);
+                if (!name){
+                    return 1;
+                }
+                layers[index].weights.attention.heads[subindex].key = smalloc(embeddingSize * embeddingSize * 3 * sizeof(float), name);
+                free(name);
+                name = mname("layers[%d].weights.attention.heads[%d].value", index, subindex);
+                if (!name){
+                    return 1;
+                }
+                layers[index].weights.attention.heads[subindex].value = smalloc(embeddingSize * embeddingSize * 3 * sizeof(float), name);
+                
+                free(name);
+                name = mname("layers[%d].biases.attention.heads[%d].query", index, subindex);
+                if (!name){
+                    return 1;
+                }
+                layers[index].biases.attention.heads[subindex].query = smalloc(embeddingSize * 3 * sizeof(float), name);
+                free(name);
+                name = mname("layers[%d].biases.attention.heads[%d].key", index, subindex);
+                if (!name){
+                    return 1;
+                }
+                layers[index].biases.attention.heads[subindex].key = smalloc(embeddingSize * 3 * sizeof(float), name);
+                free(name);
+                name = mname("layers[%d].biases.attention.heads[%d].value", index, subindex);
+                if (!name){
+                    return 1;
+                }
+                layers[index].biases.attention.heads[subindex].value = smalloc(embeddingSize * 3 * sizeof(float), name);
+                free(name);
+
+                if (!layers[index].weights.attention.heads[subindex].query){
+                    printf("Failed to allocate memory to initalize layers.\n");
+                    return 1;
+                }
+                if (!layers[index].weights.attention.heads[subindex].key){
+                    printf("Failed to allocate memory to initalize layers.\n");
+                    return 1;
+                }
+                if (!layers[index].weights.attention.heads[subindex].value){
+                    printf("Failed to allocate memory to initalize layers.\n");
+                    return 1;
+                }
+
+                if (!layers[index].biases.attention.heads[subindex].query){
+                    printf("Failed to allocate memory to initalize layers.\n");
+                    return 1;
+                }
+                if (!layers[index].biases.attention.heads[subindex].key){
+                    printf("Failed to allocate memory to initalize layers.\n");
+                    return 1;
+                }
+                if (!layers[index].biases.attention.heads[subindex].value){
+                    printf("Failed to allocate memory to initalize layers.\n");
+                    return 1;
+                }
+
+                for (int subindex_ = 0; subindex_ < embeddingSize * embeddingSize; subindex_++){
+                    layers[index].weights.attention.heads[subindex].query[subindex_ * 3] = random_range(weightsinitrange);
+                    layers[index].weights.attention.heads[subindex].key[subindex_ * 3] = random_range(weightsinitrange);
+                    layers[index].weights.attention.heads[subindex].value[subindex_ * 3] = random_range(weightsinitrange);
+                }
+
+                for (int subindex_ = 0; subindex_ < embeddingSize; subindex_++){
+                    layers[index].biases.attention.heads[subindex].query[subindex_ * 3] = random_range(biasesinitrange);
+                    layers[index].biases.attention.heads[subindex].key[subindex_ * 3] = random_range(biasesinitrange);
+                    layers[index].biases.attention.heads[subindex].value[subindex_ * 3] = random_range(biasesinitrange);
+                }
             }
 
-            for (int subindex_ = 0; subindex_ < embeddingSize; subindex_++){
-                layers[index].biases.attention.heads[subindex].query[subindex_ * 3] = random_range(biasesinitrange);
-                layers[index].biases.attention.heads[subindex].key[subindex_ * 3] = random_range(biasesinitrange);
-                layers[index].biases.attention.heads[subindex].value[subindex_ * 3] = random_range(biasesinitrange);
+            for (int subindex = 0; subindex < embeddingSize * (embeddingSize * heads); subindex++){
+                layers[index].weights.attention.output[subindex * 3] = random_range(weightsinitrange);
             }
+
+            for (int subindex = 0; subindex < embeddingSize; subindex++){
+                layers[index].biases.attention.output[subindex * 3] = random_range(biasesinitrange);
+            }
+
+            for (int subindex = 0; subindex < embeddingSize * (embeddingSize * 4); subindex++){
+                layers[index].weights.feed_forward.grow[subindex * 3] = random_range(weightsinitrange);
+            }
+
+            for (int subindex = 0; subindex < embeddingSize * 4; subindex++){
+                layers[index].biases.feed_forward.grow[subindex * 3] = random_range(biasesinitrange);
+            }
+
+            for (int subindex = 0; subindex < (embeddingSize * 4) * embeddingSize; subindex++){
+                layers[index].weights.feed_forward.shrink[subindex * 3] = random_range(weightsinitrange);
+            }
+
+            for (int subindex = 0; subindex < embeddingSize; subindex++){
+                layers[index].biases.feed_forward.shrink[subindex * 3] = random_range(biasesinitrange);
+            }
+
+            printf("Initalized layer %d/%d in %lldms.\n", index + 1, layersAmount, timer_end(timer__));
         }
 
-        for (int subindex = 0; subindex < embeddingSize * (embeddingSize * heads); subindex++){
-            layers[index].weights.attention.output[subindex * 3] = random_range(weightsinitrange);
-        }
+        printf("Initalized layers in %lldms\n", timer_end(timer_));
 
-        for (int subindex = 0; subindex < embeddingSize; subindex++){
-            layers[index].biases.attention.output[subindex * 3] = random_range(biasesinitrange);
-        }
-
-        for (int subindex = 0; subindex < embeddingSize * (embeddingSize * 4); subindex++){
-            layers[index].weights.feed_forward.grow[subindex * 3] = random_range(weightsinitrange);
-        }
-
-        for (int subindex = 0; subindex < embeddingSize * 4; subindex++){
-            layers[index].biases.feed_forward.grow[subindex * 3] = random_range(biasesinitrange);
-        }
-
-        for (int subindex = 0; subindex < (embeddingSize * 4) * embeddingSize; subindex++){
-            layers[index].weights.feed_forward.shrink[subindex * 3] = random_range(weightsinitrange);
-        }
-
-        for (int subindex = 0; subindex < embeddingSize; subindex++){
-            layers[index].biases.feed_forward.shrink[subindex * 3] = random_range(biasesinitrange);
-        }
-
-        printf("Initalized layer %d/%d in %lldms.\n", index + 1, layersAmount, timer_end(timer__));
-    }
-
-    printf("Initalized layers in %lldms\n", timer_end(timer_));
-
-    printf("Initalizing embeddings...\n");
-    timer_ = timer();
-    float** embeddings = malloc((vocab_len + gap_size) * sizeof(float*));
-    if (!embeddings){
-        printf("Failed to allocate memory to initalize embeddings.\n");
-        return 1;
-    }
-
-    for (int index = 0; index < vocab_len + gap_size; index++){
-        if (strcmp(id_to_tok[index], "PAD_NO_TOK_HERE") == 0){
-            continue;
-        }
-        char* name = mname("embeddings");
-        if (!name){
-            return 1;
-        }
-        embeddings[index] = smalloc(embeddingSize * 3 * sizeof(float), name);
-        free(name);
-        if (!embeddings[index]){
+        printf("Initalizing embeddings...\n");
+        timer_ = timer();
+        float** embeddings = malloc((vocab_len + gap_size) * sizeof(float*));
+        if (!embeddings){
             printf("Failed to allocate memory to initalize embeddings.\n");
             return 1;
         }
-        for (int subindex = 0; subindex < embeddingSize; subindex++){
-            embeddings[index][subindex * 3] = random_range(embeddinginitrange);
+
+        for (int index = 0; index < vocab_len + gap_size; index++){
+            if (strcmp(id_to_tok[index], "PAD_NO_TOK_HERE") == 0){
+                embeddings[index] = NULL;
+                continue;
+            }
+            char* name = mname("embeddings[%d]", index);
+            if (!name){
+                return 1;
+            }
+            embeddings[index] = smalloc(embeddingSize * 3 * sizeof(float), name);
+            free(name);
+            if (!embeddings[index]){
+                printf("Failed to allocate memory to initalize embeddings.\n");
+                return 1;
+            }
+            for (int subindex = 0; subindex < embeddingSize; subindex++){
+                embeddings[index][subindex * 3] = random_range(embeddinginitrange);
+            }
+        }
+
+        printf("Initalized embeddings in %lldms.\n", timer_end(timer_));
+        
+        printf("Initalizing vocabulary projection weights and biases.\n");
+        timer_ = timer();
+        
+        vp vocab_projection;
+        
+        char* name = mname("vocab_projection.weights");
+        if (!name){
+            return 1;
+        }
+        vocab_projection.weights = smalloc(vocab_len * embeddingSize * 3 * sizeof(float), name);
+        free(name);
+        name = mname("vocab_projection.biases");
+        if (!name){
+            return 1;
+        }
+        vocab_projection.biases = smalloc(vocab_len * 3 * sizeof(float), name);
+        free(name);
+        
+        if (!vocab_projection.weights){
+            printf("Failed memory allocation to initalize vocabulary projection.\n");
+            return 1;
+        }
+        if (!vocab_projection.biases){
+            printf("Failed memory allocation to initalize vocabulary projection.\n");
+            return 1;
+        }
+
+        for (int index = 0; index < vocab_len * embeddingSize; index++){
+            vocab_projection.weights[index * 3] = random_range(weightsinitrange);
+        }
+        for (int index = 0; index < vocab_len; index++){
+            vocab_projection.biases[index * 3] = random_range(biasesinitrange);
+        }
+
+        printf("Initalized vocabulary projection weights and biases in %lldms.\n", timer_end(timer_));
+        printf("Initalized model in %lldms.\n", timer_end(timer___));
+    }
+    else{
+        if (load){
+            printf("Opening model file (\"%s\").\n", model_location);
+            long long timer_ = timer();
+            mz_zip_archive zipfile;
+            memset(&zipfile, 0, sizeof(zipfile));
+            if (!mz_zip_reader_init_file(&zipfile, model_location, 0)){
+                printf("Failed to open model file (\"%s\").\n", model_location);
+                return 1;
+            }
+            printf("Opened model file in %lldms.\n", timer_end(timer_));
+
+            int n_files = (int)(mz_zip_reader_get_num_files(&zipfile));
+            printf("Loading model...\n");
+            timer_ = timer();
+            char*** files = malloc(n_files * sizeof(char**));
+            size_t* files_len = malloc(n_files * sizeof(size_t));
+            if (!files_len){
+                printf("Failed to allocate memory to load model.\n");
+                return 1;
+            }
+            if (!files){
+                printf("Failed to allocate memory to load model.\n");
+                return 1;
+            }
+            for (int index = 0; index < n_files; index++){
+                files[index] = malloc(2 * sizeof(char*));
+                if (!files[index]){
+                    printf("Failed to allocate memory to load model.\n");
+                    return 1;
+                }
+                mz_zip_archive_file_stat file_info;
+                if (mz_zip_reader_file_stat(&zipfile, index, &file_info)) {
+                    if ((size_t)(file_info.m_uncomp_size) == 0){
+                        printf("Corrupted model file.\n");
+                        return 1;
+                    }
+                    int filename_len = strlen(file_info.m_filename) + 1;
+                    files[index][0] = malloc(filename_len);
+                    files[index][1] = malloc((size_t)(file_info.m_uncomp_size));
+                    files_len[index] = (size_t)(file_info.m_uncomp_size);
+                }
+                else{
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                if (!files[index][0]){
+                    printf("Failed to allocate memory to load model.\n");
+                    return 1;
+                }
+                if (!files[index][1]){
+                    printf("Failed to allocate memory to load model.\n");
+                    return 1;
+                }
+                
+                strcpy(files[index][0], file_info.m_filename);
+                if (!mz_zip_reader_extract_to_mem(&zipfile, index, files[index][1], (size_t)(file_info.m_uncomp_size), 0)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+            }
+
+            mz_zip_reader_end(&zipfile);
+
+            bool found_model_meta = false;
+            int model_meta_index = -1;
+
+            for (int index = 0; index < n_files; index++){
+                //search for model_meta
+                if (strcmp(files[index][0], "model_meta.json") == 0){
+                    found_model_meta = true;
+                    model_meta_index = index;
+                    
+                    char* model_meta = realloc(files[index][1], files_len[index] + 1);
+                    if (!model_meta){
+                        printf("Failed memory allocation to load model.\n");
+                        return 1; //exit, os will reclaim mem
+                    }
+                    model_meta[files_len[index]] = '\0';
+                    files[index][1] = model_meta;
+                    files_len[index]++;
+                    
+                    if (strlen(model_meta) == 0){
+                        printf("Model file is corrupted.\n");
+                        return 1;
+                    }
+                    break;
+                }
+                else{
+                    continue;
+                }
+            }
+
+            if (!found_model_meta){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+
+            cJSON* model_meta = cJSON_Parse(files[model_meta_index][1]);
+            if (!model_meta){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!cJSON_IsObject(model_meta)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+
+            embeddingSize_raw = cJSON_GetObjectItem(model_meta, "embeddingSize");
+            if (!cJSON_IsNumber(embeddingSize_raw)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!isInt(embeddingSize_raw->valuedouble)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if ((int)(embeddingSize_raw->valuedouble) < 1){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            embeddingSize = (int)(embeddingSize_raw->valuedouble);
+
+            layersAmount_raw = cJSON_GetObjectItem(model_meta, "layersAmount");
+            if (!cJSON_IsNumber(layersAmount_raw)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!isInt(layersAmount_raw->valuedouble)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if ((int)(layersAmount_raw->valuedouble) < 1){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            layersAmount = (int)(layersAmount_raw->valuedouble);
+
+            heads_raw = cJSON_GetObjectItem(model_meta, "heads");
+            if (!cJSON_IsNumber(heads_raw)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!isInt(heads_raw->valuedouble)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if ((int)(heads_raw->valuedouble) < 1){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            heads = (int)(heads_raw->valuedouble);
+
+            biasesinitrange_raw = cJSON_GetObjectItem(model_meta, "biasesinitrange");
+            if (!cJSON_IsArray(biasesinitrange_raw)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (cJSON_GetArraySize(biasesinitrange_raw) != 2){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!cJSON_IsNumber(cJSON_GetArrayItem(biasesinitrange_raw, 0))){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!cJSON_IsNumber(cJSON_GetArrayItem(biasesinitrange_raw, 1))){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!biasesinitrange){
+                biasesinitrange = malloc(2 * sizeof(float));
+                if (!biasesinitrange){
+                    printf("Failed to allocate memory to load model.\n");
+                    return 1;
+                }
+            }
+            biasesinitrange[0] = (float)(cJSON_GetArrayItem(biasesinitrange_raw, 0)->valuedouble);
+            biasesinitrange[1] = (float)(cJSON_GetArrayItem(biasesinitrange_raw, 1)->valuedouble);
+            
+            embeddinginitrange_raw = cJSON_GetObjectItem(model_meta, "embeddinginitrange");
+            if (!cJSON_IsArray(embeddinginitrange_raw)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (cJSON_GetArraySize(embeddinginitrange_raw) != 2){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!cJSON_IsNumber(cJSON_GetArrayItem(embeddinginitrange_raw, 0))){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!cJSON_IsNumber(cJSON_GetArrayItem(embeddinginitrange_raw, 1))){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!embeddinginitrange){
+                embeddinginitrange = malloc(2 * sizeof(float));
+                if (!embeddinginitrange){
+                    printf("Failed to allocate memory to load model.\n");
+                    return 1;
+                }
+            }
+            embeddinginitrange[0] = (float)(cJSON_GetArrayItem(embeddinginitrange_raw, 0)->valuedouble);
+            embeddinginitrange[1] = (float)(cJSON_GetArrayItem(embeddinginitrange_raw, 1)->valuedouble);
+            
+            cJSON* adam_params_raw = cJSON_GetObjectItem(model_meta, "adam_params");
+            if (!cJSON_IsObject(adam_params_raw)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!cJSON_IsNumber(cJSON_GetObjectItem(adam_params_raw, "beta1"))){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!cJSON_IsNumber(cJSON_GetObjectItem(adam_params_raw, "beta2"))){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!cJSON_IsNumber(cJSON_GetObjectItem(adam_params_raw, "epsilon"))){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!cJSON_IsNumber(cJSON_GetObjectItem(adam_params_raw, "t"))){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!isInt(cJSON_GetObjectItem(adam_params_raw, "t")->valuedouble)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if ((int)(cJSON_GetObjectItem(adam_params_raw, "t")->valuedouble) < 0){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            adam_params.beta1 = (float)(cJSON_GetObjectItem(adam_params_raw, "beta1")->valuedouble);
+            adam_params.beta2 = (float)(cJSON_GetObjectItem(adam_params_raw, "beta2")->valuedouble);
+            adam_params.epsilon = (float)(cJSON_GetObjectItem(adam_params_raw, "epsilon")->valuedouble);
+            adam_params.t = (int)(cJSON_GetObjectItem(adam_params_raw, "t")->valuedouble);
+            
+            cJSON* step_num_raw = cJSON_GetObjectItem(model_meta, "step_num");
+            if (!cJSON_IsNumber(step_num_raw)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!isInt(step_num_raw->valuedouble)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if ((int)(step_num_raw->valuedouble) < 0){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            step_num = (int)(step_num_raw->valuedouble);
+
+            cJSON* transformer_structure = cJSON_GetObjectItem(model_meta, "transformer_structure");
+            if (!cJSON_IsObject(transformer_structure)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            cJSON* layers_raw = cJSON_GetObjectItem(transformer_structure, "layers");
+            if (!cJSON_IsArray(layers_raw)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+
+            if (layersAmount != cJSON_GetArraySize(layers_raw)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            
+            float* loadFloats(cJSON* patharr, char* allocname){
+                if (!allocname){
+                    exit(1);
+                }
+                if (!cJSON_IsArray(patharr)){
+                    printf("Model file is corrupted.\n");
+                    exit(1);
+                }
+                if (cJSON_GetArraySize(patharr) < 1){
+                    printf("Model file is corrupted.\n");
+                    exit(1);
+                }
+                size_t total_files_size = 0;
+                int total_files = 0;
+                int* files_indexes = malloc(cJSON_GetArraySize(patharr) * sizeof(int));
+                if (!files_indexes){
+                    printf("Failed to allocate memory to load model.\n");
+                    exit(1);
+                }
+                for (int index = 0; index < cJSON_GetArraySize(patharr); index++){
+                    cJSON* item = cJSON_GetArrayItem(patharr, index);
+                    if (!cJSON_IsString(item)){
+                        printf("Model file is corrupted.\n");
+                        exit(1);
+                    }
+                    bool found = false;
+                    for (int subindex = 0; subindex < n_files; subindex++){
+                        if (!files[subindex][0]){
+                            continue;
+                        }
+                        if (strcmp(item->valuestring, files[subindex][0]) == 0){
+                            found = true;
+                            total_files_size += files_len[subindex];
+                            files_indexes[index] = subindex;
+                            total_files++;
+                            break;
+                        }
+                    }
+                    if (!found){
+                        printf("Model file is corrupted.\n");
+                        exit(1);
+                    }
+                }
+
+                float* floatarr = smalloc(total_files_size, allocname);
+                free(allocname);
+                if (!floatarr){
+                    printf("Failed to allocate memory to load model.\n");
+                    exit(1);
+                }
+                size_t curr_w = 0;
+                for (int index = 0; index < total_files; index++){
+                    //Chars are only one byte and we wanna count in bytes here therefore let's make c
+                    //shut the fuck up.
+                    memcpy(((char*)floatarr) + curr_w, files[files_indexes[index]][1], files_len[files_indexes[index]]);
+                    free(files[files_indexes[index]][0]);
+                    free(files[files_indexes[index]][1]);
+                    files[files_indexes[index]][0] = NULL;
+                    files[files_indexes[index]][1] = NULL;
+
+                    curr_w += files_len[files_indexes[index]];
+                }
+
+                free(files_indexes);
+
+                return floatarr;
+            }
+
+            layer* layers = malloc(layersAmount * sizeof(layer));
+            if (!layers){
+                printf("Failed memory allocation to load model.\n");
+                return 1;
+            }
+
+            for (int index = 0; index < cJSON_GetArraySize(layers_raw); index++){
+                cJSON* layer_curr = cJSON_GetArrayItem(layers_raw, index);
+                if (!cJSON_IsObject(layer_curr)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                cJSON* weights_lc = cJSON_GetObjectItem(layer_curr, "weights");
+                if (!cJSON_IsObject(weights_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                cJSON* normalize_1_lc = cJSON_GetObjectItem(weights_lc, "normalize_1");
+                if (!cJSON_IsArray(normalize_1_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                layers[index].weights.normalize_1 = loadFloats(normalize_1_lc, mname("layers[%d].weights.normalize_1", index));
+                
+                cJSON* normalize_2_lc = cJSON_GetObjectItem(weights_lc, "normalize_2");
+                if (!cJSON_IsArray(normalize_2_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                layers[index].weights.normalize_2 = loadFloats(normalize_2_lc, mname("layers[%d].weights.normalize_2", index));
+
+                cJSON* attention_lc = cJSON_GetObjectItem(weights_lc, "attention");
+                if (!cJSON_IsObject(attention_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+
+                cJSON* heads_lc = cJSON_GetObjectItem(attention_lc, "heads");
+                if (!cJSON_IsArray(heads_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+
+                if (cJSON_GetArraySize(heads_lc) != heads){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+
+                layers[index].weights.attention.heads = malloc(heads * sizeof(*layers[index].weights.attention.heads));
+                if (!layers[index].weights.attention.heads){
+                    printf("Failed to allocate memory to load model.\n");
+                    return 1;
+                }
+
+                for (int subindex = 0; subindex < heads; subindex++){
+                    if (!cJSON_IsObject(cJSON_GetArrayItem(heads_lc, subindex))){
+                        printf("Model file is corrupted.\n");
+                        return 1;
+                    }
+                    cJSON* query_lh_lc = cJSON_GetObjectItem(cJSON_GetArrayItem(heads_lc, subindex), "query");
+                    cJSON* key_lh_lc = cJSON_GetObjectItem(cJSON_GetArrayItem(heads_lc, subindex), "key");
+                    cJSON* value_lh_lc = cJSON_GetObjectItem(cJSON_GetArrayItem(heads_lc, subindex), "value");
+                    if (!cJSON_IsArray(query_lh_lc)){
+                        printf("Model file is corrupted.\n");
+                        return 1;
+                    }
+                    if (!cJSON_IsArray(key_lh_lc)){
+                        printf("Model file is corrupted.\n");
+                        return 1;
+                    }
+                    if (!cJSON_IsArray(value_lh_lc)){
+                        printf("Model file is corrupted.\n");
+                        return 1;
+                    }
+                    layers[index].weights.attention.heads[subindex].query = loadFloats(query_lh_lc, mname("layers[%d].weights.attention.heads[%d].query", index, subindex));
+                    layers[index].weights.attention.heads[subindex].key = loadFloats(key_lh_lc, mname("layers[%d].weights.attention.heads[%d].key", index, subindex));
+                    layers[index].weights.attention.heads[subindex].value = loadFloats(value_lh_lc, mname("layers[%d].weights.attention.heads[%d].value", index, subindex));
+                }
+                
+                cJSON* attn_o_lc = cJSON_GetObjectItem(attention_lc, "output");
+                if (!cJSON_IsArray(attn_o_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                layers[index].weights.attention.output = loadFloats(attn_o_lc, mname("layers[%d].weights.attention.output", index));
+
+                cJSON* ffw_lc = cJSON_GetObjectItem(weights_lc, "feed_forward");
+                if (!cJSON_IsObject(ffw_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+
+                cJSON* ffw_grow_lc = cJSON_GetObjectItem(ffw_lc, "grow");
+                cJSON* ffw_shrink_lc = cJSON_GetObjectItem(ffw_lc, "shrink");
+                if (!cJSON_IsArray(ffw_grow_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                if (!cJSON_IsArray(ffw_shrink_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                layers[index].weights.feed_forward.grow = loadFloats(ffw_grow_lc, mname("layers[%d].weights.feed_forward.grow", index));
+                layers[index].weights.feed_forward.shrink = loadFloats(ffw_shrink_lc, mname("layers[%d].weights.feed_forward.shrink", index));
+
+
+                weights_lc = cJSON_GetObjectItem(layer_curr, "biases");
+                if (!cJSON_IsObject(weights_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                normalize_1_lc = cJSON_GetObjectItem(weights_lc, "normalize_1");
+                if (!cJSON_IsArray(normalize_1_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                layers[index].biases.normalize_1 = loadFloats(normalize_1_lc, mname("layers[%d].biases.normalize_1", index));
+
+                normalize_2_lc = cJSON_GetObjectItem(weights_lc, "normalize_2");
+                if (!cJSON_IsArray(normalize_2_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                layers[index].biases.normalize_2 = loadFloats(normalize_2_lc, mname("layers[%d].biases.normalize_2", index));
+
+                attention_lc = cJSON_GetObjectItem(weights_lc, "attention");
+                if (!cJSON_IsObject(attention_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+
+                heads_lc = cJSON_GetObjectItem(attention_lc, "heads");
+                if (!cJSON_IsArray(heads_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+
+                if (cJSON_GetArraySize(heads_lc) != heads){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+
+                layers[index].biases.attention.heads = malloc(heads * sizeof(*layers[index].biases.attention.heads));
+                if (!layers[index].biases.attention.heads){
+                    printf("Failed to allocate memory to load model.\n");
+                    return 1;
+                }
+
+                for (int subindex = 0; subindex < heads; subindex++){
+                    if (!cJSON_IsObject(cJSON_GetArrayItem(heads_lc, subindex))){
+                        printf("Model file is corrupted.\n");
+                        return 1;
+                    }
+                    cJSON* query_lh_lc = cJSON_GetObjectItem(cJSON_GetArrayItem(heads_lc, subindex), "query");
+                    cJSON* key_lh_lc = cJSON_GetObjectItem(cJSON_GetArrayItem(heads_lc, subindex), "key");
+                    cJSON* value_lh_lc = cJSON_GetObjectItem(cJSON_GetArrayItem(heads_lc, subindex), "value");
+                    if (!cJSON_IsArray(query_lh_lc)){
+                        printf("Model file is corrupted.\n");
+                        return 1;
+                    }
+                    if (!cJSON_IsArray(key_lh_lc)){
+                        printf("Model file is corrupted.\n");
+                        return 1;
+                    }
+                    if (!cJSON_IsArray(value_lh_lc)){
+                        printf("Model file is corrupted.\n");
+                        return 1;
+                    }
+                    layers[index].biases.attention.heads[subindex].query = loadFloats(query_lh_lc, mname("layers[%d].biases.attention.heads[%d].query", index, subindex));
+                    layers[index].biases.attention.heads[subindex].key = loadFloats(key_lh_lc, mname("layers[%d].biases.attention.heads[%d].key", index, subindex));
+                    layers[index].biases.attention.heads[subindex].value = loadFloats(value_lh_lc, mname("layers[%d].biases.attention.heads[%d].value", index, subindex));
+                }
+
+                attn_o_lc = cJSON_GetObjectItem(attention_lc, "output");
+                if (!cJSON_IsArray(attn_o_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                layers[index].biases.attention.output = loadFloats(attn_o_lc, mname("layers[%d].biases.attention.output", index));
+
+                ffw_lc = cJSON_GetObjectItem(weights_lc, "feed_forward");
+                if (!cJSON_IsObject(ffw_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+
+                ffw_grow_lc = cJSON_GetObjectItem(ffw_lc, "grow");
+                ffw_shrink_lc = cJSON_GetObjectItem(ffw_lc, "shrink");
+                if (!cJSON_IsArray(ffw_grow_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                if (!cJSON_IsArray(ffw_shrink_lc)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                layers[index].biases.feed_forward.grow = loadFloats(ffw_grow_lc, mname("layers[%d].biases.feed_forward.grow", index));
+                layers[index].biases.feed_forward.shrink = loadFloats(ffw_shrink_lc, mname("layers[%d].biases.feed_forward.shrink", index));
+            }
+            cJSON* embeddings_raw = cJSON_GetObjectItem(transformer_structure, "embeddings");
+            if (!cJSON_IsArray(embeddings_raw)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            int embeddings_raw_size = cJSON_GetArraySize(embeddings_raw);
+            if (embeddings_raw_size != vocab_len){
+                printf("The model you are trying to load doesn't use the same vocabulary as yours.\n");
+                return 1;
+            }
+            cJSON* curr_embedding_raw_item = cJSON_GetArrayItem(embeddings_raw, 0);
+
+            float** embeddings = calloc((vocab_len + gap_size) * sizeof(float*), 1);
+            if (!embeddings){
+                printf("Failed to allocate memory to load model.\n");
+                return 1;
+            }
+
+            char* digits = malloc(11);
+            if (!digits){
+                printf("Failed memory allocation to load model.\n");
+                return 1;
+            }
+            strcpy(digits, "0123456789");
+
+            for (int index = 0; index < embeddings_raw_size; index++){
+                if (!cJSON_IsArray(curr_embedding_raw_item)){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                //get id from filename
+                //we will hope id is consistent and the first number in the str of the filename.
+                if (!cJSON_IsString(cJSON_GetArrayItem(curr_embedding_raw_item, 0))){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                int curr_embedding_raw_item_filename_len = strlen(cJSON_GetArrayItem(curr_embedding_raw_item, 0)->valuestring);
+                if (curr_embedding_raw_item_filename_len == 0){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                char* num_ = malloc(32);
+                bool foundid = false;
+                
+                if (!num_){
+                    printf("Failed to allocate memory to load model.\n");
+                    return 1;
+                }
+                int cursor_ = 0;
+                for (int subindex = 0; subindex < curr_embedding_raw_item_filename_len; subindex++){
+                    char currchr = cJSON_GetArrayItem(curr_embedding_raw_item, 0)->valuestring[subindex];
+                    bool isdigit = false;
+                    for (int subsubindex = 0; subsubindex < 10; subsubindex++){
+                        if (digits[subsubindex] == currchr){
+                            isdigit = true;
+                            foundid = true;
+                            break;
+                        }
+                    }
+                    if (!isdigit){
+                        if (foundid){
+                            break;
+                        }
+                    }
+                    else{
+                        if (cursor_ < 31){
+                            num_[cursor_] = currchr;
+                            cursor_++;
+                        }
+                    }
+                }
+                if (!foundid){
+                    printf("Model file is corrupted.\n");
+                    return 1;
+                }
+                num_[cursor_] = '\0';
+                int id = atoi(num_);
+                free(num_);
+
+                if (!id_to_token(id)){
+                    printf("The model you are trying to load doesn't use the same vocabulary as yours.\n");
+                    return 1;
+                }
+
+                embeddings[id] = loadFloats(curr_embedding_raw_item, mname("embeddings[%d]", id));
+                curr_embedding_raw_item = curr_embedding_raw_item->next;
+            }
+
+            for (int index = 0; index < n_files; index++){
+                if (files[index][0]){
+                    free(files[index][0]);
+                }
+                if (files[index][1]){
+                    free(files[index][1]);
+                }
+                free(files[index]);
+            }
+            free(files);
+            free(files_len);
+            printf("Loaded model in %lldms.\n", timer_end(timer_));
         }
     }
-
-    printf("Initalized embeddings in %lldms.\n", timer_end(timer_));
     
-    printf("Initalizing vocabulary projection weights and biases.\n");
-    timer_ = timer();
-    typedef struct {
-        float* weights;
-        float* biases;
-    } vp;
-
-    vp vocab_projection;
-    
-    char* name = mname("vocab_projection.weights");
-    if (!name){
-        return 1;
-    }
-    vocab_projection.weights = smalloc(vocab_len * embeddingSize * 3 * sizeof(float), name);
-    free(name);
-    name = mname("vocab_projection.biases");
-    if (!name){
-        return 1;
-    }
-    vocab_projection.biases = smalloc(vocab_len * 3, name);
-    free(name);
-    
-    if (!vocab_projection.weights){
-        printf("Failed memory allocation to initalize vocabulary projection.\n");
-        return 1;
-    }
-    if (!vocab_projection.biases){
-        printf("Failed memory allocation to initalize vocabulary projection.\n");
-        return 1;
-    }
-
-    for (int index = 0; index < vocab_len * embeddingSize; index++){
-        vocab_projection.weights[index * 3] = random_range(weightsinitrange);
-    }
-    for (int index = 0; index < vocab_len; index++){
-        vocab_projection.biases[index * 3] = random_range(biasesinitrange);
-    }
-
-    printf("Initalized vocabulary projection weights and biases in %lldms.\n", timer_end(timer_));
-    printf("Initalized model in %lldms.\n", timer_end(timer___));
 
     printf("Enter strings to tokenize:\n");
     while (true){
