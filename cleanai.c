@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <ctype.h>
+#include <math.h>
 
 #include "libs/cJSON.h"
 #include "libs/cJSON.c"
@@ -222,8 +223,9 @@ void* rmalloc(const char* sharename){
 }
 #endif
 
-float sqrtf(float to){
-    return __builtin_sqrtf(to);
+int itoa(int value, char* buff, int base){
+    //fuck base
+    return sprintf(buff, "%d", value);
 }
 
 char* input(char* qry){
@@ -1704,6 +1706,8 @@ int main(int argc, char** argv){
         float* biases;
     } vp;
 
+    vp vocab_projection;
+
     char* mname(const char* fmt, ...) {
         if (!fmt) return NULL;
 
@@ -1743,8 +1747,10 @@ int main(int argc, char** argv){
     }
 
     //Chat we cookin
+    layer* layers = NULL;
+    float** embeddings = NULL;
     if (new){
-        layer* layers = malloc(layersAmount * sizeof(layer));
+        layers = malloc(layersAmount * sizeof(layer));
         if (!layers){
             printf("Failed to allocate memory to initalize layers.\n");
             return 1;
@@ -1980,7 +1986,7 @@ int main(int argc, char** argv){
 
         printf("Initalizing embeddings...\n");
         timer_ = timer();
-        float** embeddings = malloc((vocab_len + gap_size) * sizeof(float*));
+        embeddings = malloc((vocab_len + gap_size) * sizeof(float*));
         if (!embeddings){
             printf("Failed to allocate memory to initalize embeddings.\n");
             return 1;
@@ -2010,8 +2016,6 @@ int main(int argc, char** argv){
         
         printf("Initalizing vocabulary projection weights and biases.\n");
         timer_ = timer();
-        
-        vp vocab_projection;
         
         char* name = mname("vocab_projection.weights");
         if (!name){
@@ -2385,7 +2389,7 @@ int main(int argc, char** argv){
                 return floatarr;
             }
 
-            layer* layers = malloc(layersAmount * sizeof(layer));
+            layers = malloc(layersAmount * sizeof(layer));
             if (!layers){
                 printf("Failed memory allocation to load model.\n");
                 return 1;
@@ -2596,7 +2600,7 @@ int main(int argc, char** argv){
             }
             cJSON* curr_embedding_raw_item = cJSON_GetArrayItem(embeddings_raw, 0);
 
-            float** embeddings = calloc((vocab_len + gap_size) * sizeof(float*), 1);
+            embeddings = calloc((vocab_len + gap_size) * sizeof(float*), 1);
             if (!embeddings){
                 printf("Failed to allocate memory to load model.\n");
                 return 1;
@@ -2672,6 +2676,24 @@ int main(int argc, char** argv){
                 curr_embedding_raw_item = curr_embedding_raw_item->next;
             }
 
+            cJSON* vocab_projection_raw = cJSON_GetObjectItem(transformer_structure, "vocab_projection");
+            if (!cJSON_IsObject(vocab_projection_raw)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            cJSON* vocab_projection_raw_weights = cJSON_GetObjectItem(vocab_projection_raw, "weights");
+            cJSON* vocab_projection_raw_biases = cJSON_GetObjectItem(vocab_projection_raw, "biases");
+            if (!cJSON_IsArray(vocab_projection_raw_weights)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            if (!cJSON_IsArray(vocab_projection_raw_biases)){
+                printf("Model file is corrupted.\n");
+                return 1;
+            }
+            vocab_projection.weights = loadFloats(vocab_projection_raw_weights, mname("vocab_projection.weights"));
+            vocab_projection.biases = loadFloats(vocab_projection_raw_biases, mname("vocab_projection.biases"));
+
             for (int index = 0; index < n_files; index++){
                 if (files[index][0]){
                     free(files[index][0]);
@@ -2686,7 +2708,621 @@ int main(int argc, char** argv){
             printf("Loaded model in %lldms.\n", timer_end(timer_));
         }
     }
+
+    float** calculate_positional_encoding(int sequence_length){
+        float** positional_encodings = malloc(sequence_length * sizeof(float*));
+        if (!positional_encodings){
+            printf("Failed to allocate memory to calculate positional encodings.\n");
+            exit(1);
+        }
+        for (int index = 0; index < sequence_length; index++){
+            positional_encodings[index] = malloc(embeddingSize * sizeof(float));
+            if (!positional_encodings[index]){
+                printf("Failed to allocate memory to calculate positional encodings.\n");
+                exit(1);
+            }
+            for (int subindex = 0; subindex < embeddingSize; subindex++){
+                float denominator = powf(10000.0f, (2.0f * floorf(subindex / 2.0f)) / (float)(embeddingSize));
+                if (subindex % 2 == 0){
+                    positional_encodings[index][subindex] = sinf(index / denominator);
+                }
+                else{
+                    positional_encodings[index][subindex] = cosf(index / denominator);
+                }
+            }
+        }
+        return positional_encodings;
+    }
+
+    float* get_embedding(int id){
+        if (!id_to_token(id)){
+            return NULL; //Invalid token.
+        }
+        return embeddings[id];
+    }
+
+    float* _calculate_x_hat_only(float* in, int in_len){
+        if (!in){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL;
+        }
+        if (in_len < 1){
+            return NULL;
+        }
+        float mean = 0;
+        for (int index = 0; index < in_len; index++){
+            mean += in[index];
+        }
+        mean = mean / in_len;
+
+        float varience = 0;
+        for (int index = 0; index < in_len; index++){
+            varience += (in[index] - mean) * (in[index] - mean);
+        }
+        varience = varience / in_len;
+
+        float epsilon = 1e-8;
+        float std = sqrtf(varience + epsilon);
+        
+        float* x_hat = malloc(in_len * sizeof(float));
+        if (!x_hat){
+            printf("Failed memory allocation to calculate x hat.\n");
+            exit(1);
+        }
+        for (int index = 0; index < in_len; index++){
+            x_hat[index] = (in[index] - mean) / std;
+        }
+
+        return x_hat;
+    }
+
+    float* normalize_vector(float* vec, int vec_len, float* g, float* b){
+        if (!vec){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL; //deref null is crazy work bro
+        }
+        if (vec_len < 1){
+            return NULL;
+        }
+        if (!g){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL;
+        }
+        if (!b){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL;
+        }
+        float* x_hat = _calculate_x_hat_only(vec, vec_len);
+        if (!x_hat){
+            printf("Failed to calculate x_hat.\n"); //In case physics have broken down or a bitflip or idk
+            exit(1);
+        }
+        for (int index = 0; index < vec_len; index++){
+            x_hat[index] = x_hat[index] * g[index * 3] + b[index * 3];
+        }
+
+        return x_hat;
+    }
+
+    float dot_product(float* vec1, int vec1_len, float* vec2, int vec2_len){
+        float sum = 0;
+        if (vec1_len != vec2_len){
+            return -1; //Bro what the fuck
+        }
+        if (vec1_len < 1){
+            return -1; //...
+        }
+        if (!vec1){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return -1; //dereference NULL is crazy work
+        }
+        if (!vec2){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return -1;
+        }
+        for (int index = 0; index < vec1_len; index++){
+            sum += vec1[index] * vec2[index];
+        }
+        return sum;
+    }
+
+    float* add_vectors(float* vec1, int vec1_len, float* vec2, int vec2_len){
+        if (vec1_len != vec2_len){
+            return NULL;
+        }
+        if (vec1_len < 1){
+            return NULL;
+        }
+        if (!vec1){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL;
+        }
+        if (!vec2){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL;
+        }
+
+        float* new_vec = malloc(vec1_len * sizeof(float));
+        if (!new_vec){
+            printf("Failed memory allocation to add vectors.\n");
+            exit(1);
+        }
+        
+        for (int index = 0; index < vec1_len; index++){
+            new_vec[index] = vec1[index] + vec2[index];
+        }
+
+        return new_vec;
+    }
+
+    float* softmax(float* vec, int vec_len){
+        if (!vec){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL;
+        }
+        if (vec_len < 1){
+            return NULL;
+        }
+        
+        float max = -__FLT_MAX__;
+        for (int index = 0; index < vec_len; index++){
+            if (vec[index] > max){
+                max = vec[index];
+            }
+        }
+        
+        float* rets = malloc(vec_len * sizeof(float));
+        if (!rets){
+            printf("Failed memory allocation to do softmax.\n");
+            exit(1);
+        }
+        
+        for (int index = 0; index < vec_len; index++){
+            rets[index] = expf(vec[index] - max);
+        }
+
+        long double exp_sum = 0;
+        for (int index = 0; index < vec_len; index++){
+            exp_sum += rets[index];
+        }
+        if (exp_sum == 0){
+            for (int index = 0; index < vec_len; index++){
+                rets[index] = 1.0f / (float)(vec_len);
+            }
+            return rets;
+        }
+        for (int index = 0; index < vec_len; index++){
+            rets[index] = rets[index] / (float)(exp_sum);
+        }
+        return rets;
+    }
     
+    bool save(char* filepath){
+        if (!filepath){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return false;
+        }
+
+        printf("Saving model at path \"%s\"...\n", filepath);
+        long long save_timer = timer();
+
+        //I tought the following function existed but it didn't, let's satisfy the code.
+        void cJSON_AddNumberToArray(cJSON* arr, float n){
+            cJSON_AddItemToArray(arr, cJSON_CreateNumber(n));
+            return;
+        }
+
+        cJSON* model_meta_root = cJSON_CreateObject();
+        
+        cJSON_AddNumberToObject(model_meta_root, "contextSize", contextSize);
+        cJSON_AddNumberToObject(model_meta_root, "embeddingSize", embeddingSize);
+        cJSON_AddNumberToObject(model_meta_root, "learningRate", learningRate);
+        cJSON_AddNumberToObject(model_meta_root, "maxOutputSize", maxOutputSize);
+        cJSON_AddNumberToObject(model_meta_root, "layersAmount", layersAmount);
+        cJSON_AddNumberToObject(model_meta_root, "heads", heads);
+        
+        cJSON* biasesinitrange_save = cJSON_CreateArray();
+        cJSON_AddNumberToArray(biasesinitrange_save, biasesinitrange[0]);
+        cJSON_AddNumberToArray(biasesinitrange_save, biasesinitrange[1]);
+        cJSON_AddItemToObject(model_meta_root, "biasesinitrange", biasesinitrange_save);
+
+        cJSON* embeddinginitrange_save = cJSON_CreateArray();
+        cJSON_AddNumberToArray(embeddinginitrange_save, embeddinginitrange[0]);
+        cJSON_AddNumberToArray(embeddinginitrange_save, embeddinginitrange[1]);
+        cJSON_AddItemToObject(model_meta_root, "embeddinginitrange", embeddinginitrange_save);
+
+        cJSON* adam_params_save = cJSON_CreateObject();
+        cJSON_AddNumberToObject(adam_params_save, "beta1", adam_params.beta1);
+        cJSON_AddNumberToObject(adam_params_save, "beta2", adam_params.beta2);
+        cJSON_AddNumberToObject(adam_params_save, "epsilon", adam_params.epsilon);
+        cJSON_AddNumberToObject(adam_params_save, "t", adam_params.t);
+        cJSON_AddItemToObject(model_meta_root, "adam_params", adam_params_save);
+
+        cJSON_AddNumberToObject(model_meta_root, "step_num", step_num);
+
+        cJSON* transformer_structure_save = cJSON_CreateObject();
+        cJSON* layers_save = cJSON_CreateArray();
+
+        for (int index = 0; index < layersAmount; index++){
+            cJSON* layer_curr_save = cJSON_CreateObject();
+            cJSON* weights_save = cJSON_CreateObject();
+
+            cJSON* normalize_1_save = cJSON_CreateArray();
+            char num1[32];
+            itoa(index, num1, 10);
+            char norm_spath[strlen("layers[].weights.normalize_1") + strlen(num1) + 1];
+            sprintf(norm_spath, "layers[%s].weights.normalize_1", num1);
+            cJSON_AddItemToArray(normalize_1_save, cJSON_CreateString(norm_spath));
+            cJSON_AddItemToObject(weights_save, "normalize_1", normalize_1_save);
+
+            cJSON* normalize_2_save = cJSON_CreateArray();
+            sprintf(norm_spath, "layers[%s].weights.normalize_2", num1);
+            cJSON_AddItemToArray(normalize_2_save, cJSON_CreateString(norm_spath));
+            cJSON_AddItemToObject(weights_save, "normalize_2", normalize_2_save);
+
+            cJSON* attention_save = cJSON_CreateObject();
+            cJSON* heads_save = cJSON_CreateArray();
+            for (int subindex = 0; subindex < heads; subindex++){
+                cJSON* heads_save_curr = cJSON_CreateObject();
+                
+                cJSON* query_curr = cJSON_CreateArray();
+                char num2[32];
+                itoa(subindex, num2, 10);
+                char query_spath[strlen(num2) + strlen("layers[].weights.attention.heads[].query") + strlen(num1) + 1];
+                sprintf(query_spath, "layers[%s].weights.attention.heads[%s].query", num1, num2);
+                cJSON_AddItemToArray(query_curr, cJSON_CreateString(query_spath));
+                cJSON_AddItemToObject(heads_save_curr, "query", query_curr);
+
+                cJSON* key_curr = cJSON_CreateArray();
+                sprintf(query_spath, "layers[%s].weights.attention.heads[%s].key", num1, num2);
+                cJSON_AddItemToArray(key_curr, cJSON_CreateString(query_spath));
+                cJSON_AddItemToObject(heads_save_curr, "key", key_curr);
+
+                cJSON* value_curr = cJSON_CreateArray();
+                sprintf(query_spath, "layers[%s].weights.attention.heads[%s].value", num1, num2);
+                cJSON_AddItemToArray(value_curr, cJSON_CreateString(query_spath));
+                cJSON_AddItemToObject(heads_save_curr, "value", value_curr);
+
+                cJSON_AddItemToArray(heads_save, heads_save_curr);
+            }
+
+            cJSON_AddItemToObject(attention_save, "heads", heads_save);
+
+            cJSON* output_save = cJSON_CreateArray();
+            char output_curr_spath[strlen(num1) + strlen("layers[].weights.attention.output") + 1];
+            sprintf(output_curr_spath, "layers[%s].weights.attention.output", num1);
+            cJSON_AddItemToArray(output_save, cJSON_CreateString(output_curr_spath));
+            cJSON_AddItemToObject(attention_save, "output", output_save);
+
+            cJSON_AddItemToObject(weights_save, "attention", attention_save);
+
+            cJSON* ffw_save = cJSON_CreateObject();
+            cJSON* ffw_save_grow = cJSON_CreateArray();
+            cJSON* ffw_save_shrink = cJSON_CreateArray();
+            
+            char ffw_spaths[strlen(num1) + strlen("layers[].weights.feed_forward.shrink") + 1];
+            sprintf(ffw_spaths, "layers[%s].weights.feed_forward.grow", num1);
+            cJSON_AddItemToArray(ffw_save_grow, cJSON_CreateString(ffw_spaths));
+
+            sprintf(ffw_spaths, "layers[%s].weights.feed_forward.shrink", num1);
+            cJSON_AddItemToArray(ffw_save_shrink, cJSON_CreateString(ffw_spaths));
+
+            cJSON_AddItemToObject(ffw_save, "grow", ffw_save_grow);
+            cJSON_AddItemToObject(ffw_save, "shrink", ffw_save_shrink);
+
+            cJSON_AddItemToObject(weights_save, "feed_forward", ffw_save);
+            
+            cJSON_AddItemToObject(layer_curr_save, "weights", weights_save);
+
+
+            cJSON* biases_save = cJSON_CreateObject();
+
+            cJSON* normalize_1_biases = cJSON_CreateArray();
+            char norm1_bpath[strlen("layers[].biases.normalize_1") + strlen(num1) + 1];
+            sprintf(norm1_bpath, "layers[%s].biases.normalize_1", num1);
+            cJSON_AddItemToArray(normalize_1_biases, cJSON_CreateString(norm1_bpath));
+            cJSON_AddItemToObject(biases_save, "normalize_1", normalize_1_biases);
+
+            cJSON* normalize_2_biases = cJSON_CreateArray();
+            sprintf(norm1_bpath, "layers[%s].biases.normalize_2", num1);
+            cJSON_AddItemToArray(normalize_2_biases, cJSON_CreateString(norm1_bpath));
+            cJSON_AddItemToObject(biases_save, "normalize_2", normalize_2_biases);
+
+            cJSON* attention_biases = cJSON_CreateObject();
+            cJSON* heads_biases = cJSON_CreateArray();
+            for (int subindex = 0; subindex < heads; subindex++){
+                cJSON* heads_biases_curr = cJSON_CreateObject();
+
+                char num2[32];
+                itoa(subindex, num2, 10);
+
+                cJSON* query_bias = cJSON_CreateArray();
+                char query_bpath[strlen(num2) + strlen("layers[].biases.attention.heads[].query") + strlen(num1) + 1];
+                sprintf(query_bpath, "layers[%s].biases.attention.heads[%s].query", num1, num2);
+                cJSON_AddItemToArray(query_bias, cJSON_CreateString(query_bpath));
+                cJSON_AddItemToObject(heads_biases_curr, "query", query_bias);
+
+                cJSON* key_bias = cJSON_CreateArray();
+                sprintf(query_bpath, "layers[%s].biases.attention.heads[%s].key", num1, num2);
+                cJSON_AddItemToArray(key_bias, cJSON_CreateString(query_bpath));
+                cJSON_AddItemToObject(heads_biases_curr, "key", key_bias);
+
+                cJSON* value_bias = cJSON_CreateArray();
+                sprintf(query_bpath, "layers[%s].biases.attention.heads[%s].value", num1, num2);
+                cJSON_AddItemToArray(value_bias, cJSON_CreateString(query_bpath));
+                cJSON_AddItemToObject(heads_biases_curr, "value", value_bias);
+
+                cJSON_AddItemToArray(heads_biases, heads_biases_curr);
+            }
+            cJSON_AddItemToObject(attention_biases, "heads", heads_biases);
+
+            cJSON* output_bias = cJSON_CreateArray();
+            char output_bpath[strlen(num1) + strlen("layers[].biases.attention.output") + 1];
+            sprintf(output_bpath, "layers[%s].biases.attention.output", num1);
+            cJSON_AddItemToArray(output_bias, cJSON_CreateString(output_bpath));
+            cJSON_AddItemToObject(attention_biases, "output", output_bias);
+
+            cJSON_AddItemToObject(biases_save, "attention", attention_biases);
+
+            cJSON* ffw_biases = cJSON_CreateObject();
+            cJSON* ffw_bias_grow = cJSON_CreateArray();
+            cJSON* ffw_bias_shrink = cJSON_CreateArray();
+
+            char ffw_bpaths[strlen(num1) + strlen("layers[].biases.feed_forward.shrink") + 1];
+            sprintf(ffw_bpaths, "layers[%s].biases.feed_forward.grow", num1);
+            cJSON_AddItemToArray(ffw_bias_grow, cJSON_CreateString(ffw_bpaths));
+
+            sprintf(ffw_bpaths, "layers[%s].biases.feed_forward.shrink", num1);
+            cJSON_AddItemToArray(ffw_bias_shrink, cJSON_CreateString(ffw_bpaths));
+
+            cJSON_AddItemToObject(ffw_biases, "grow", ffw_bias_grow);
+            cJSON_AddItemToObject(ffw_biases, "shrink", ffw_bias_shrink);
+
+            cJSON_AddItemToObject(biases_save, "feed_forward", ffw_biases);
+
+            cJSON_AddItemToObject(layer_curr_save, "biases", biases_save);
+
+            cJSON_AddItemToArray(layers_save, layer_curr_save);
+        }
+
+        cJSON_AddItemToObject(transformer_structure_save, "layers", layers_save);
+        
+        cJSON* embeddings_save = cJSON_CreateArray();
+
+        for (int index = 0; index < vocab_len + gap_size; index++){
+            if (!embeddings[index]){
+                continue;
+            }
+            cJSON* embedding_curr_save = cJSON_CreateArray();
+            char num__[32];
+            itoa(index, num__, 10);
+            char spath_curr[strlen(num__) + strlen("embeddings[]") + 1];
+            sprintf(spath_curr, "embeddings[%s]", num__);
+
+            cJSON_AddItemToArray(embedding_curr_save, cJSON_CreateString(spath_curr));
+            cJSON_AddItemToArray(embeddings_save, embedding_curr_save);
+        }
+
+        cJSON_AddItemToObject(transformer_structure_save, "embeddings", embeddings_save);
+
+        cJSON* vocab_projection_save = cJSON_CreateObject();
+        cJSON* vocab_projection_save_weights = cJSON_CreateArray();
+        cJSON* vocab_projection_save_biases = cJSON_CreateArray();
+
+        cJSON_AddItemToArray(vocab_projection_save_weights, cJSON_CreateString("vocab_projection.weights"));
+        cJSON_AddItemToArray(vocab_projection_save_biases, cJSON_CreateString("vocab_projection.biases"));
+
+        cJSON_AddItemToObject(vocab_projection_save, "weights", vocab_projection_save_weights);
+        cJSON_AddItemToObject(vocab_projection_save, "biases", vocab_projection_save_biases);
+
+        cJSON_AddItemToObject(transformer_structure_save, "vocab_projection", vocab_projection_save);
+
+        cJSON_AddItemToObject(model_meta_root, "transformer_structure", transformer_structure_save);
+
+        char* model_meta_save = cJSON_PrintUnformatted(model_meta_root);
+        size_t model_meta_save_len = strlen(model_meta_save);
+        cJSON_Delete(model_meta_root);
+
+        //now zip it
+        mz_zip_archive zipfile;
+        memset(&zipfile, 0, sizeof(zipfile));
+        
+        if (!mz_zip_writer_init_file(&zipfile, filepath, 0)){
+            printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+            return false;
+        }
+
+        if (!mz_zip_writer_add_mem(&zipfile, "model_meta.json", model_meta_save, model_meta_save_len, MZ_BEST_COMPRESSION)){
+            printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+            mz_zip_writer_end(&zipfile);
+            return false;
+        }
+
+        free(model_meta_save);
+
+        for (int index = 0; index < layersAmount; index++){
+            char _num[32];
+            itoa(index, _num, 10);
+            char normalize_path[strlen(_num) + strlen("layers[].weights.normalize_1") + 1];
+            sprintf(normalize_path, "layers[%s].weights.normalize_1", _num);
+
+            if (!mz_zip_writer_add_mem(&zipfile, normalize_path, layers[index].weights.normalize_1, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                mz_zip_writer_end(&zipfile);
+                return false;
+            }
+
+            sprintf(normalize_path, "layers[%s].weights.normalize_2", _num);
+
+            if (!mz_zip_writer_add_mem(&zipfile, normalize_path, layers[index].weights.normalize_2, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                mz_zip_writer_end(&zipfile);
+                return false;
+            }
+
+            for (int subindex = 0; subindex < heads; subindex++){
+                char _num2[32];
+                itoa(subindex, _num2, 10);
+                char head_data_path[strlen(_num) + strlen(_num2) + strlen("layers[].weights.attention.heads[].query") + 1];
+                sprintf(head_data_path, "layers[%s].weights.attention.heads[%s].query", _num, _num2);
+
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].query, embeddingSize * embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                    printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                    mz_zip_writer_end(&zipfile);
+                    return false;
+                }
+
+                sprintf(head_data_path, "layers[%s].weights.attention.heads[%s].key", _num, _num2);
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].key, embeddingSize * embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                    printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                    mz_zip_writer_end(&zipfile);
+                    return false;
+                }
+
+                sprintf(head_data_path, "layers[%s].weights.attention.heads[%s].value", _num, _num2);
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].value, embeddingSize * embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                    printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                    mz_zip_writer_end(&zipfile);
+                    return false;
+                }
+            }
+
+            char attn_o_path[strlen(_num) + strlen("layers[].weights.attention.output") + 1];
+            sprintf(attn_o_path, "layers[%s].weights.attention.output", _num);
+            if (!mz_zip_writer_add_mem(&zipfile, attn_o_path, layers[index].weights.attention.output, embeddingSize * (embeddingSize * heads) * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                mz_zip_writer_end(&zipfile);
+                return false;
+            }
+
+            char ffw_paths[strlen(_num) + strlen("layers[].weights.feed_forward.shrink") + 1];
+            sprintf(ffw_paths, "layers[%s].weights.feed_forward.grow", _num);
+            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths, layers[index].weights.feed_forward.grow, embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                mz_zip_writer_end(&zipfile);
+                return false;
+            }
+
+            sprintf(ffw_paths, "layers[%s].weights.feed_forward.shrink", _num);
+            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths, layers[index].weights.feed_forward.shrink, embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                mz_zip_writer_end(&zipfile);
+                return false;
+            }
+
+            //also do biases
+
+            itoa(index, _num, 10);
+            char normalize_path_[strlen(_num) + strlen("layers[].biases.normalize_1") + 1];
+            sprintf(normalize_path_, "layers[%s].biases.normalize_1", _num);
+
+            if (!mz_zip_writer_add_mem(&zipfile, normalize_path_, layers[index].biases.normalize_1, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                mz_zip_writer_end(&zipfile);
+                return false;
+            }
+
+            sprintf(normalize_path_, "layers[%s].biases.normalize_2", _num);
+
+            if (!mz_zip_writer_add_mem(&zipfile, normalize_path_, layers[index].biases.normalize_2, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                mz_zip_writer_end(&zipfile);
+                return false;
+            }
+
+            for (int subindex = 0; subindex < heads; subindex++){
+                char _num2[32];
+                itoa(subindex, _num2, 10);
+                char head_data_path[strlen(_num) + strlen(_num2) + strlen("layers[].biases.attention.heads[].query") + 1];
+                sprintf(head_data_path, "layers[%s].biases.attention.heads[%s].query", _num, _num2);
+
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].query, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                    printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                    mz_zip_writer_end(&zipfile);
+                    return false;
+                }
+
+                sprintf(head_data_path, "layers[%s].biases.attention.heads[%s].key", _num, _num2);
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].key, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                    printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                    mz_zip_writer_end(&zipfile);
+                    return false;
+                }
+
+                sprintf(head_data_path, "layers[%s].biases.attention.heads[%s].value", _num, _num2);
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].value, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                    printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                    mz_zip_writer_end(&zipfile);
+                    return false;
+                }
+            }
+
+            char attn_o_path_[strlen(_num) + strlen("layers[].biases.attention.output") + 1];
+            sprintf(attn_o_path_, "layers[%s].biases.attention.output", _num);
+            if (!mz_zip_writer_add_mem(&zipfile, attn_o_path_, layers[index].biases.attention.output, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                mz_zip_writer_end(&zipfile);
+                return false;
+            }
+
+            char ffw_paths_[strlen(_num) + strlen("layers[].biases.feed_forward.shrink") + 1];
+            sprintf(ffw_paths_, "layers[%s].biases.feed_forward.grow", _num);
+            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths_, layers[index].biases.feed_forward.grow, (embeddingSize * 4) * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                mz_zip_writer_end(&zipfile);
+                return false;
+            }
+
+            sprintf(ffw_paths_, "layers[%s].biases.feed_forward.shrink", _num);
+            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths_, layers[index].biases.feed_forward.shrink, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                mz_zip_writer_end(&zipfile);
+                return false;
+            }
+        }
+
+        for (int index = 0; index < vocab_len + gap_size; index++){
+            if (!id_to_token(index)){
+                continue; //skip gaps
+            }
+            char _num[32];
+            itoa(index, _num, 10);
+            char embeddingPath[strlen(_num) + strlen("embeddings[]") + 1];
+            sprintf(embeddingPath, "embeddings[%s]", _num);
+
+            if (!mz_zip_writer_add_mem(&zipfile, embeddingPath, embeddings[index], embeddingSize * sizeof(float), MZ_BEST_COMPRESSION)){
+                printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                mz_zip_writer_end(&zipfile);
+                return false;
+            }
+        }
+
+        if (!mz_zip_writer_add_mem(&zipfile, "vocab_projection.weights", vocab_projection.weights, vocab_len * embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+            printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+            mz_zip_writer_end(&zipfile);
+            return false;
+        }
+
+        if (!mz_zip_writer_add_mem(&zipfile, "vocab_projection.biases", vocab_projection.biases, vocab_len * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+            printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+            mz_zip_writer_end(&zipfile);
+            return false;
+        }
+
+        if (!mz_zip_writer_finalize_archive(&zipfile)) {
+            printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+            mz_zip_writer_end(&zipfile);
+            return false;
+        }
+
+        mz_zip_writer_end(&zipfile);
+
+        printf("Saved model at path \"%s\" in %lldms.\n", filepath, timer_end(save_timer));
+
+        return true;
+    }
+    save("bruh.zip");
+    return 0;
 
     printf("Enter strings to tokenize:\n");
     while (true){
