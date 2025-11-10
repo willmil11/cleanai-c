@@ -18,28 +18,6 @@
 #include <conio.h>
 #include <tlhelp32.h>
 
-unsigned long getPid(){
-    return (unsigned long)GetCurrentProcessId();
-}
-
-unsigned long getParentPid(){
-    DWORD pid = GetCurrentProcessId();
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return 0;
-
-    PROCESSENTRY32 pe;
-    pe.dwSize = sizeof(pe);
-    if (!Process32First(snap, &pe)) { CloseHandle(snap); return 0; }
-
-    DWORD ppid = 0;
-    do {
-        if (pe.th32ProcessID == pid) { ppid = pe.th32ParentProcessID; break; }
-    } while (Process32Next(snap, &pe));
-
-    CloseHandle(snap);
-    return (unsigned long)ppid;
-}
-
 long long time_ms(){
     FILETIME ft;
     GetSystemTimeAsFileTime(&ft);
@@ -93,30 +71,6 @@ char* input_with_timeout(char* qry, int timeout_ms){
     return buff;
 }
 
-void* smalloc(size_t size, const char* sharename){
-    HANDLE hMap = CreateFileMappingA(
-        INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE,
-        (DWORD)((unsigned long long)size >> 32),
-        (DWORD)(size & 0xFFFFFFFF),
-        sharename
-    );
-    if (!hMap) return NULL;
-
-    void* p = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, size);
-    CloseHandle(hMap); // view keeps mapping alive
-    return p;
-}
-
-void* rmalloc(const char* sharename){
-    HANDLE hMap = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, sharename);
-    if (!hMap) return NULL;
-
-    /* 0 size maps the entire section on Windows */
-    void* p = MapViewOfFile(hMap, FILE_MAP_ALL_ACCESS, 0, 0, 0);
-    CloseHandle(hMap);
-    return p;
-}
-
 #else
 #include <sys/time.h>
 #include <sys/select.h>
@@ -124,13 +78,6 @@ void* rmalloc(const char* sharename){
 #include <sys/mman.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-
-unsigned long getPid(){
-    return (unsigned long)getpid();
-}
-unsigned long getParentPid(){
-    return (unsigned long)getppid();
-}
 
 long long time_ms(){
     struct timeval tv;
@@ -184,42 +131,6 @@ char* input_with_timeout(char* qry, int timeout_ms){
     
     free(buff);
     return NULL;
-}
-
-void* smalloc(size_t size, const char* sharename){
-    int fd = shm_open(sharename, O_CREAT | O_RDWR, 0666);
-    if (fd == -1) return NULL;
-
-    if (ftruncate(fd, (off_t)size) == -1) {
-        close(fd);
-        shm_unlink(sharename);
-        return NULL;
-    }
-
-    void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    close(fd);
-    if (p == MAP_FAILED) {
-        shm_unlink(sharename);
-        return NULL;
-    }
-    return p;
-}
-
-void* rmalloc(const char* sharename){
-    int fd = shm_open(sharename, O_RDWR, 0666);
-    if (fd == -1) return NULL;
-
-    struct stat st;
-    if (fstat(fd, &st) == -1) {
-        close(fd);
-        return NULL;
-    }
-    size_t size = (size_t)st.st_size;
-
-    void* p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    close(fd);
-    if (p == MAP_FAILED) return NULL;
-    return p;
 }
 #endif
 
@@ -532,8 +443,9 @@ int main(int argc, char** argv){
     bool do_train = false;
     bool new = false;
     bool load = false;
+    bool debug = false;
 
-    char* valid_flags[] = {"--new", "--load", "--config", "--train", "--pretrain", NULL};
+    char* valid_flags[] = {"--new", "--load", "--config", "--train", "--pretrain", "--debug", NULL};
     int valid_flags_len = 0;
     while (true){
         if (!(valid_flags[valid_flags_len] == NULL)){
@@ -663,15 +575,26 @@ int main(int argc, char** argv){
                             strcpy(config_location, nextArg);
                         }
                         else{
-                            int help_message_len = strlen("Arg \"") + strlen(arg) + strlen("\" is invalid.") + 1;
-                            char* help_message = malloc(help_message_len);
-                            if (!help_message){
-                                printf("Failed to allocate memory to parse args.\n");
-                                return 1;
+                            if (strcmp(arg, "--debug") == 0){
+                                if (debug){
+                                    help("You can't specify --debug multiple times.");
+                                    return 0;
+                                }
+                                else{
+                                    debug = true;
+                                }
                             }
-                            sprintf(help_message, "Arg \"%s\" is invalid.", arg);
-                            help(help_message);
-                            return 0;
+                            else{
+                                int help_message_len = strlen("Arg \"") + strlen(arg) + strlen("\" is invalid.") + 1;
+                                char* help_message = malloc(help_message_len);
+                                if (!help_message){
+                                    printf("Failed to allocate memory to parse args.\n");
+                                    return 1;
+                                }
+                                sprintf(help_message, "Arg \"%s\" is invalid.", arg);
+                                help(help_message);
+                                return 0;
+                            }
                         }
                     }
                 }
@@ -1414,40 +1337,19 @@ int main(int argc, char** argv){
     printf("Computing id to token table...\n");
     
     int vocab_len = cJSON_GetArraySize(vocab);
-    int vocab_toksize = 0;
     int* vocab_per_toksize = NULL;
-    bool* where_gap = NULL;
     int vocab_per_toksize_len = 0;
-    int where_gap_len = 0;
-    int gap_size = 0;
-    int lastId = -1;  // Start from -1 to allow 0 as first ID
-    int cursor = 0;
-    int padlen = strlen("PAD_NO_TOK_HERE") + 1;
-    char* padtok = malloc(padlen);
-    if (!padtok){
-        printf("Failed to allocate memory to compute id to token table...\n");
-        return 1;
-    }
-    strcpy(padtok, "PAD_NO_TOK_HERE");
 
     cJSON* item = vocab->child;
     int index = 0;
 
     while (item != NULL){
-        if (!cJSON_IsArray(item) || cJSON_GetArraySize(item) != 2) {
+        if (!cJSON_IsString(item)) {
             printf("Vocabulary item %d/%d is corrupted.\n", index + 1, vocab_len);
             return 1;
         }
 
-        cJSON* item_elem_a = item->child; // string
-        cJSON* item_elem_b = item_elem_a->next; // int ID
-
-        if (!cJSON_IsString(item_elem_a) || !cJSON_IsNumber(item_elem_b)) {
-            printf("Vocabulary item %d/%d is corrupted.\n", index + 1, vocab_len);
-            return 1;
-        }
-
-        int item_strlen = strlen(item_elem_a->valuestring) + 1; // +1 for null terminator
+        int item_strlen = strlen(item->valuestring) + 1; // +1 for null terminator
 
         // Grow vocab_per_toksize array
         vocab_per_toksize = realloc(vocab_per_toksize, (vocab_per_toksize_len + 1) * sizeof(int));
@@ -1457,37 +1359,10 @@ int main(int argc, char** argv){
         }
         vocab_per_toksize[vocab_per_toksize_len++] = item_strlen;
 
-        vocab_toksize += item_strlen;
-
-        int current_id = (int)(item_elem_b->valuedouble);
-
-        // Fill any gaps between lastId and current_id
-        while (lastId + 1 < current_id) {
-            where_gap = realloc(where_gap, (where_gap_len + 1) * sizeof(bool));
-            if (!where_gap) {
-                printf("Failed to allocate memory for where_gap.\n");
-                return 1;
-            }
-            where_gap[where_gap_len++] = true;  // there's a gap here
-            lastId++;
-            gap_size++;
-            cursor++;
-        }
-
-        // Mark current ID as non-gap
-        where_gap = realloc(where_gap, (where_gap_len + 1) * sizeof(bool));
-        if (!where_gap) {
-            printf("Failed to allocate memory for where_gap.\n");
-            return 1;
-        }
-        where_gap[where_gap_len++] = false;
-
-        lastId = current_id;
-        cursor++;
         item = item->next;
         index++;
     }
-    char** id_to_tok = malloc((gap_size + vocab_len) * sizeof(char*));
+    char** id_to_tok = malloc(vocab_len * sizeof(char*));
     if (!id_to_tok){
         printf("Failed memory allocation to compute id to token table.\n");
         return 1;
@@ -1495,21 +1370,16 @@ int main(int argc, char** argv){
     int vocab_index = 0;
     cJSON* item_outer = vocab->child;
     char* item_ = NULL;
-    for (int index = 0; index < gap_size + vocab_len; index++){
-        if (where_gap[index] == false){
-            item_ = item_outer->child->valuestring;
-            id_to_tok[index] = malloc(vocab_per_toksize[vocab_index]);
-            if (!id_to_tok[index]){
-                printf("Failed memory allocation to compute id to token table.\n");
-                return 1;
-            }
-            strcpy(id_to_tok[index], item_);
-            item_outer = item_outer->next;
-            vocab_index++;
+    for (int index = 0; index < vocab_len; index++){
+        item_ = item_outer->valuestring;
+        id_to_tok[index] = malloc(vocab_per_toksize[vocab_index]);
+        if (!id_to_tok[index]){
+            printf("Failed memory allocation to compute id to token table.\n");
+            return 1;
         }
-        else{
-            id_to_tok[index] = padtok;
-        }
+        strcpy(id_to_tok[index], item_);
+        item_outer = item_outer->next;
+        vocab_index++;
     }
     printf("Computed id to token table in %lldms.\n", timer_end(timer_));
     printf("Computing token to id data...\n");
@@ -1520,9 +1390,9 @@ int main(int argc, char** argv){
         int id;
     } TokenEntry;
 
-    TokenEntry* token_to_id_tokensort = malloc((gap_size + vocab_len) * sizeof(TokenEntry));
+    TokenEntry* token_to_id_tokensort = malloc(vocab_len * sizeof(TokenEntry));
 
-    for (int index = 0; index < gap_size + vocab_len; index++){
+    for (int index = 0; index < vocab_len; index++){
         token_to_id_tokensort[index].token = id_to_tok[index];
         token_to_id_tokensort[index].id = index;
     }
@@ -1531,15 +1401,14 @@ int main(int argc, char** argv){
         return strcmp(((TokenEntry*)a)->token, ((TokenEntry*)b)->token);
     }
 
-    qsort(token_to_id_tokensort, vocab_len + gap_size, sizeof(TokenEntry), cmp_tokens);
+    qsort(token_to_id_tokensort, vocab_len, sizeof(TokenEntry), cmp_tokens);
     
     free(vocab_per_toksize);
-    free(where_gap);
     printf("Computed token to id data in %lldms.\n", timer_end(timer_));
 
     int token_to_id(char* tok) { //binary search bruh
         int left = 0;
-        int right = (vocab_len + gap_size) - 1;
+        int right = vocab_len - 1;
 
         while (left <= right) {
             int mid = (left + right) / 2;
@@ -1561,7 +1430,7 @@ int main(int argc, char** argv){
     }
 
     char* id_to_token(int id){
-        if (id > gap_size + vocab_len){
+        if (id >= vocab_len){
             return NULL;
         }
         else{
@@ -1570,12 +1439,7 @@ int main(int argc, char** argv){
             }
             else{
                 char* res = id_to_tok[id];
-                if (strcmp(res, "PAD_NO_TOK_HERE") == 0){
-                    return NULL;
-                }
-                else{
-                    return res;
-                }
+                return res;
             }
         }
     }
@@ -1708,42 +1572,15 @@ int main(int argc, char** argv){
 
     vp vocab_projection;
 
-    char* mname(const char* fmt, ...) {
-        if (!fmt) return NULL;
-
-        char pidbuf[32];
-        snprintf(pidbuf, sizeof pidbuf, "%lu", getPid());
-
-        va_list ap;
-        va_start(ap, fmt);
-
-        // compute formatted length (excl. '\0')
-        int needed;
-#if defined(_WIN32)
-        va_list ap1; va_copy(ap1, ap);
-        needed = _vscprintf(fmt, ap1);
-        va_end(ap1);
-#else
-        va_list ap1; va_copy(ap1, ap);
-        needed = vsnprintf(NULL, 0, fmt, ap1);
-        va_end(ap1);
-#endif
-        if (needed < 0) { va_end(ap); return NULL; }
-
-        size_t prefix_len = strlen(pidbuf) + 2; // '/' and '_'
-        size_t total = prefix_len + (size_t)needed + 1;
-
-        char* out = malloc(total);
-        if (!out) {
-            printf("Failed to allocate memory to generate shared memory name.\n");
-            va_end(ap);
-            return NULL;
+    void dprintf(const char *format, ...) {
+        if (!debug) {
+            return;
         }
 
-        int wrote = snprintf(out, total, "/%s_", pidbuf);
-        (void)vsnprintf(out + wrote, total - (size_t)wrote, fmt, ap);
-        va_end(ap);
-        return out;
+        va_list args;
+        va_start(args, format);
+        vprintf(format, args);
+        va_end(args);
     }
 
     //Chat we cookin
@@ -1758,68 +1595,18 @@ int main(int argc, char** argv){
         for (int index = 0; index < layersAmount; index++){
             printf("Initalizing layer %d/%d...\n", index + 1, layersAmount);
             long long timer__ = timer();
-            char* name = mname("layers[%d].weights.normalize_1", index);
-            if (!name){
-                return 1;
-            }
-            layers[index].weights.normalize_1 = smalloc(embeddingSize * 3 * sizeof(float), name);
-            free(name);
-            name = mname("layers[%d].weights.normalize_2", index);
-            if (!name){
-                return 1;
-            }
-            layers[index].weights.normalize_2 = smalloc(embeddingSize * 3 * sizeof(float), name);
-            free(name);
-            name = mname("layers[%d].biases.normalize_1", index);
-            if (!name){
-                return 1;
-            }
-            layers[index].biases.normalize_1 = smalloc(embeddingSize * 3 * sizeof(float), name);
-            free(name);
-            name = mname("layers[%d].biases.normalize_2", index);
-            if (!name){
-                return 1;
-            }
-            layers[index].biases.normalize_2 = smalloc(embeddingSize * 3 * sizeof(float), name);
+            layers[index].weights.normalize_1 = calloc(embeddingSize * 3 * sizeof(float), 1);
+            layers[index].weights.normalize_2 = calloc(embeddingSize * 3 * sizeof(float), 1);
+            layers[index].biases.normalize_1 = calloc(embeddingSize * 3 * sizeof(float), 1);
+            layers[index].biases.normalize_2 = calloc(embeddingSize * 3 * sizeof(float), 1);
             layers[index].weights.attention.heads = malloc(heads * sizeof(*layers[index].weights.attention.heads));
             layers[index].biases.attention.heads = malloc(heads * sizeof(*layers[index].biases.attention.heads));
-            free(name);
-            name = mname("layers[%d].weights.attention.output", index);
-            if (!name){
-                return 1;
-            }
-            layers[index].weights.attention.output = smalloc(embeddingSize * (embeddingSize * heads) * 3 * sizeof(float), name);
-            free(name);
-            name = mname("layers[%d].biases.attention.output", index);
-            if (!name){
-                return 1;
-            }
-            layers[index].biases.attention.output = smalloc(embeddingSize * 3 * sizeof(float), name);
-            free(name);
-            name = mname("layers[%d].weights.feed_forward.grow", index);
-            if (!name){
-                return 1;
-            }
-            layers[index].weights.feed_forward.grow = smalloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), name);
-            free(name);
-            name = mname("layers[%d].weights.feed_forward.shrink", index);
-            if (!name){
-                return 1;
-            }
-            layers[index].weights.feed_forward.shrink = smalloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), name);
-            free(name);
-            name = mname("layers[%d].biases.feed_forward.grow", index);
-            if (!name){
-                return 1;
-            }
-            layers[index].biases.feed_forward.grow = smalloc((embeddingSize * 4) * 3 * sizeof(float), name);
-            free(name);
-            name = mname("layers[%d].biases.feed_forward.shrink", index);
-            if (!name){
-                return 1;
-            }
-            layers[index].biases.feed_forward.shrink = smalloc(embeddingSize * 3 * sizeof(float), name);
-            free(name);
+            layers[index].weights.attention.output = calloc(embeddingSize * (embeddingSize * heads) * 3 * sizeof(float), 1);
+            layers[index].biases.attention.output = calloc(embeddingSize * 3 * sizeof(float), 1);
+            layers[index].weights.feed_forward.grow = calloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), 1);
+            layers[index].weights.feed_forward.shrink = calloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), 1);
+            layers[index].biases.feed_forward.grow = calloc((embeddingSize * 4) * 3 * sizeof(float), 1);
+            layers[index].biases.feed_forward.shrink = calloc(embeddingSize * 3 * sizeof(float), 1);
 
             if (!layers[index].weights.normalize_1){
                 printf("Failed to allocate memory to initalize layers.\n");
@@ -1878,43 +1665,13 @@ int main(int argc, char** argv){
             }
 
             for (int subindex = 0; subindex < heads; subindex++){
-                name = mname("layers[%d].weights.attention.heads[%d].query", index, subindex);
-                if (!name){
-                    return 1;
-                }
-                layers[index].weights.attention.heads[subindex].query = smalloc(embeddingSize * embeddingSize * 3 * sizeof(float), name);
-                free(name);
-                name = mname("layers[%d].weights.attention.heads[%d].key", index, subindex);
-                if (!name){
-                    return 1;
-                }
-                layers[index].weights.attention.heads[subindex].key = smalloc(embeddingSize * embeddingSize * 3 * sizeof(float), name);
-                free(name);
-                name = mname("layers[%d].weights.attention.heads[%d].value", index, subindex);
-                if (!name){
-                    return 1;
-                }
-                layers[index].weights.attention.heads[subindex].value = smalloc(embeddingSize * embeddingSize * 3 * sizeof(float), name);
+                layers[index].weights.attention.heads[subindex].query = calloc(embeddingSize * embeddingSize * 3 * sizeof(float), 1);
+                layers[index].weights.attention.heads[subindex].key = calloc(embeddingSize * embeddingSize * 3 * sizeof(float), 1);
+                layers[index].weights.attention.heads[subindex].value = calloc(embeddingSize * embeddingSize * 3 * sizeof(float), 1);
                 
-                free(name);
-                name = mname("layers[%d].biases.attention.heads[%d].query", index, subindex);
-                if (!name){
-                    return 1;
-                }
-                layers[index].biases.attention.heads[subindex].query = smalloc(embeddingSize * 3 * sizeof(float), name);
-                free(name);
-                name = mname("layers[%d].biases.attention.heads[%d].key", index, subindex);
-                if (!name){
-                    return 1;
-                }
-                layers[index].biases.attention.heads[subindex].key = smalloc(embeddingSize * 3 * sizeof(float), name);
-                free(name);
-                name = mname("layers[%d].biases.attention.heads[%d].value", index, subindex);
-                if (!name){
-                    return 1;
-                }
-                layers[index].biases.attention.heads[subindex].value = smalloc(embeddingSize * 3 * sizeof(float), name);
-                free(name);
+                layers[index].biases.attention.heads[subindex].query = calloc(embeddingSize * 3 * sizeof(float), 1);
+                layers[index].biases.attention.heads[subindex].key = calloc(embeddingSize * 3 * sizeof(float), 1);
+                layers[index].biases.attention.heads[subindex].value = calloc(embeddingSize * 3 * sizeof(float), 1);
 
                 if (!layers[index].weights.attention.heads[subindex].query){
                     printf("Failed to allocate memory to initalize layers.\n");
@@ -1986,23 +1743,14 @@ int main(int argc, char** argv){
 
         printf("Initalizing embeddings...\n");
         timer_ = timer();
-        embeddings = malloc((vocab_len + gap_size) * sizeof(float*));
+        embeddings = malloc((vocab_len) * sizeof(float*));
         if (!embeddings){
             printf("Failed to allocate memory to initalize embeddings.\n");
             return 1;
         }
 
-        for (int index = 0; index < vocab_len + gap_size; index++){
-            if (strcmp(id_to_tok[index], "PAD_NO_TOK_HERE") == 0){
-                embeddings[index] = NULL;
-                continue;
-            }
-            char* name = mname("embeddings[%d]", index);
-            if (!name){
-                return 1;
-            }
-            embeddings[index] = smalloc(embeddingSize * 3 * sizeof(float), name);
-            free(name);
+        for (int index = 0; index < vocab_len; index++){
+            embeddings[index] = calloc(embeddingSize * 3 * sizeof(float), 1);
             if (!embeddings[index]){
                 printf("Failed to allocate memory to initalize embeddings.\n");
                 return 1;
@@ -2017,18 +1765,8 @@ int main(int argc, char** argv){
         printf("Initalizing vocabulary projection weights and biases.\n");
         timer_ = timer();
         
-        char* name = mname("vocab_projection.weights");
-        if (!name){
-            return 1;
-        }
-        vocab_projection.weights = smalloc(vocab_len * embeddingSize * 3 * sizeof(float), name);
-        free(name);
-        name = mname("vocab_projection.biases");
-        if (!name){
-            return 1;
-        }
-        vocab_projection.biases = smalloc(vocab_len * 3 * sizeof(float), name);
-        free(name);
+        vocab_projection.weights = calloc(vocab_len * embeddingSize * 3 * sizeof(float), 1);
+        vocab_projection.biases = calloc(vocab_len * 3 * sizeof(float), 1);
         
         if (!vocab_projection.weights){
             printf("Failed memory allocation to initalize vocabulary projection.\n");
@@ -2042,6 +1780,7 @@ int main(int argc, char** argv){
         for (int index = 0; index < vocab_len * embeddingSize; index++){
             vocab_projection.weights[index * 3] = random_range(weightsinitrange);
         }
+
         for (int index = 0; index < vocab_len; index++){
             vocab_projection.biases[index * 3] = random_range(biasesinitrange);
         }
@@ -2075,6 +1814,8 @@ int main(int argc, char** argv){
                 return 1;
             }
             for (int index = 0; index < n_files; index++){
+                printf("\rLoading model file %d/%d...", index + 1, n_files);
+                fflush(stdout);
                 files[index] = malloc(2 * sizeof(char*));
                 if (!files[index]){
                     printf("Failed to allocate memory to load model.\n");
@@ -2093,6 +1834,7 @@ int main(int argc, char** argv){
                 }
                 else{
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_0\n");
                     return 1;
                 }
                 if (!files[index][0]){
@@ -2107,67 +1849,115 @@ int main(int argc, char** argv){
                 strcpy(files[index][0], file_info.m_filename);
                 if (!mz_zip_reader_extract_to_mem(&zipfile, index, files[index][1], (size_t)(file_info.m_uncomp_size), 0)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_1\n");
                     return 1;
                 }
+
+                fflush(stdout);
             }
+            printf("\nLoaded all model files.\n");
 
             mz_zip_reader_end(&zipfile);
 
-            bool found_model_meta = false;
-            int model_meta_index = -1;
+            typedef struct {
+                char* name;
+                int index;
+            } FileEntry;
 
-            for (int index = 0; index < n_files; index++){
-                //search for model_meta
-                if (strcmp(files[index][0], "model_meta.json") == 0){
-                    found_model_meta = true;
-                    model_meta_index = index;
-                    
-                    char* model_meta = realloc(files[index][1], files_len[index] + 1);
-                    if (!model_meta){
-                        printf("Failed memory allocation to load model.\n");
-                        return 1; //exit, os will reclaim mem
+            int cmp_files(const void *a, const void *b) {
+                return strcmp(((const FileEntry*)a)->name, ((const FileEntry*)b)->name);
+            }
+
+            FileEntry *file_to_idx_sorted = malloc(n_files * sizeof(FileEntry));
+            for (int index = 0; index < n_files; index++) {
+                file_to_idx_sorted[index].name = files[index][0];
+                file_to_idx_sorted[index].index  = index;
+            }
+            qsort(file_to_idx_sorted, n_files, sizeof(FileEntry), cmp_files);
+
+            int filename_to_index(char *name) {
+                int left = 0;
+                int right = n_files - 1;
+                while (left <= right) {
+                    int middle = (left + right) / 2;
+                    int cmp = strcmp(name, file_to_idx_sorted[middle].name);
+                    if (cmp == 0){
+                        return file_to_idx_sorted[middle].index;
                     }
-                    model_meta[files_len[index]] = '\0';
-                    files[index][1] = model_meta;
-                    files_len[index]++;
-                    
-                    if (strlen(model_meta) == 0){
-                        printf("Model file is corrupted.\n");
-                        return 1;
+                    if (cmp < 0){
+                        right = middle - 1;
                     }
-                    break;
+                    else{
+                        left = middle + 1;
+                    }
                 }
-                else{
-                    continue;
+                return -1;
+            }
+
+            bool found_model_meta = false;
+            int model_meta_index = filename_to_index("model_meta.json");
+            
+            if (model_meta_index != -1){
+                found_model_meta = true;
+                
+                char* model_meta = realloc(files[model_meta_index][1], files_len[model_meta_index] + 1);
+                if (!model_meta){
+                    printf("Failed memory allocation to load model.\n");
+                    return 1; //exit, os will reclaim mem
+                }
+                model_meta[files_len[model_meta_index]] = '\0';
+                files[model_meta_index][1] = model_meta;
+                files_len[model_meta_index]++;
+                
+                if (strlen(model_meta) == 0){
+                    printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_2\n");
+                    return 1;
                 }
             }
 
             if (!found_model_meta){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_3\n");
                 return 1;
             }
 
+            //if (debug){
+            //    dprintf("Model meta:\n\"");
+            //    for (int index = 0; index < files_len[model_meta_index]; index++){
+            //        dprintf("%c", files[model_meta_index][1][index]);
+            //    }
+            //    dprintf("\"\n");
+            //}
             cJSON* model_meta = cJSON_Parse(files[model_meta_index][1]);
             if (!model_meta){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_4\n");
+                dprintf("cJSON additional info: \"%s\"\n", cJSON_GetErrorPtr());
+                dprintf("First few bytes: '%.20s'\n", files[model_meta_index][1]);
+                dprintf("Length: %zu\n", strlen(files[model_meta_index][1]));
                 return 1;
             }
             if (!cJSON_IsObject(model_meta)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_5\n");
                 return 1;
             }
 
             embeddingSize_raw = cJSON_GetObjectItem(model_meta, "embeddingSize");
             if (!cJSON_IsNumber(embeddingSize_raw)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_6\n");
                 return 1;
             }
             if (!isInt(embeddingSize_raw->valuedouble)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_7\n");
                 return 1;
             }
             if ((int)(embeddingSize_raw->valuedouble) < 1){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_8\n");
                 return 1;
             }
             embeddingSize = (int)(embeddingSize_raw->valuedouble);
@@ -2175,14 +1965,17 @@ int main(int argc, char** argv){
             layersAmount_raw = cJSON_GetObjectItem(model_meta, "layersAmount");
             if (!cJSON_IsNumber(layersAmount_raw)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_9\n");
                 return 1;
             }
             if (!isInt(layersAmount_raw->valuedouble)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_10\n");
                 return 1;
             }
             if ((int)(layersAmount_raw->valuedouble) < 1){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_11\n");
                 return 1;
             }
             layersAmount = (int)(layersAmount_raw->valuedouble);
@@ -2190,14 +1983,17 @@ int main(int argc, char** argv){
             heads_raw = cJSON_GetObjectItem(model_meta, "heads");
             if (!cJSON_IsNumber(heads_raw)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_12\n");
                 return 1;
             }
             if (!isInt(heads_raw->valuedouble)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_13\n");
                 return 1;
             }
             if ((int)(heads_raw->valuedouble) < 1){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_14\n");
                 return 1;
             }
             heads = (int)(heads_raw->valuedouble);
@@ -2205,24 +2001,29 @@ int main(int argc, char** argv){
             biasesinitrange_raw = cJSON_GetObjectItem(model_meta, "biasesinitrange");
             if (!cJSON_IsArray(biasesinitrange_raw)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_15\n");
                 return 1;
             }
             if (cJSON_GetArraySize(biasesinitrange_raw) != 2){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_16\n");
                 return 1;
             }
             if (!cJSON_IsNumber(cJSON_GetArrayItem(biasesinitrange_raw, 0))){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_17\n");
                 return 1;
             }
             if (!cJSON_IsNumber(cJSON_GetArrayItem(biasesinitrange_raw, 1))){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_18\n");
                 return 1;
             }
             if (!biasesinitrange){
                 biasesinitrange = malloc(2 * sizeof(float));
                 if (!biasesinitrange){
                     printf("Failed to allocate memory to load model.\n");
+                    dprintf("Err code: 0_19\n");
                     return 1;
                 }
             }
@@ -2232,18 +2033,22 @@ int main(int argc, char** argv){
             embeddinginitrange_raw = cJSON_GetObjectItem(model_meta, "embeddinginitrange");
             if (!cJSON_IsArray(embeddinginitrange_raw)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_20\n");
                 return 1;
             }
             if (cJSON_GetArraySize(embeddinginitrange_raw) != 2){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_21\n");
                 return 1;
             }
             if (!cJSON_IsNumber(cJSON_GetArrayItem(embeddinginitrange_raw, 0))){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_22\n");
                 return 1;
             }
             if (!cJSON_IsNumber(cJSON_GetArrayItem(embeddinginitrange_raw, 1))){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_23\n");
                 return 1;
             }
             if (!embeddinginitrange){
@@ -2259,30 +2064,37 @@ int main(int argc, char** argv){
             cJSON* adam_params_raw = cJSON_GetObjectItem(model_meta, "adam_params");
             if (!cJSON_IsObject(adam_params_raw)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_24\n");
                 return 1;
             }
             if (!cJSON_IsNumber(cJSON_GetObjectItem(adam_params_raw, "beta1"))){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_25\n");
                 return 1;
             }
             if (!cJSON_IsNumber(cJSON_GetObjectItem(adam_params_raw, "beta2"))){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_26\n");
                 return 1;
             }
             if (!cJSON_IsNumber(cJSON_GetObjectItem(adam_params_raw, "epsilon"))){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_27\n");
                 return 1;
             }
             if (!cJSON_IsNumber(cJSON_GetObjectItem(adam_params_raw, "t"))){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_28\n");
                 return 1;
             }
             if (!isInt(cJSON_GetObjectItem(adam_params_raw, "t")->valuedouble)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_29\n");
                 return 1;
             }
             if ((int)(cJSON_GetObjectItem(adam_params_raw, "t")->valuedouble) < 0){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_30\n");
                 return 1;
             }
             adam_params.beta1 = (float)(cJSON_GetObjectItem(adam_params_raw, "beta1")->valuedouble);
@@ -2293,14 +2105,17 @@ int main(int argc, char** argv){
             cJSON* step_num_raw = cJSON_GetObjectItem(model_meta, "step_num");
             if (!cJSON_IsNumber(step_num_raw)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_31\n");
                 return 1;
             }
             if (!isInt(step_num_raw->valuedouble)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_32\n");
                 return 1;
             }
             if ((int)(step_num_raw->valuedouble) < 0){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_33\n");
                 return 1;
             }
             step_num = (int)(step_num_raw->valuedouble);
@@ -2308,29 +2123,31 @@ int main(int argc, char** argv){
             cJSON* transformer_structure = cJSON_GetObjectItem(model_meta, "transformer_structure");
             if (!cJSON_IsObject(transformer_structure)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_34\n");
                 return 1;
             }
             cJSON* layers_raw = cJSON_GetObjectItem(transformer_structure, "layers");
             if (!cJSON_IsArray(layers_raw)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_35\n");
                 return 1;
             }
 
             if (layersAmount != cJSON_GetArraySize(layers_raw)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_36\n");
                 return 1;
             }
-            
-            float* loadFloats(cJSON* patharr, char* allocname){
-                if (!allocname){
-                    exit(1);
-                }
+
+            float* loadFloats(cJSON* patharr){
                 if (!cJSON_IsArray(patharr)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_37\n");
                     exit(1);
                 }
                 if (cJSON_GetArraySize(patharr) < 1){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_38\n");
                     exit(1);
                 }
                 size_t total_files_size = 0;
@@ -2344,29 +2161,26 @@ int main(int argc, char** argv){
                     cJSON* item = cJSON_GetArrayItem(patharr, index);
                     if (!cJSON_IsString(item)){
                         printf("Model file is corrupted.\n");
+                        dprintf("Err code: 0_39\n");
                         exit(1);
                     }
                     bool found = false;
-                    for (int subindex = 0; subindex < n_files; subindex++){
-                        if (!files[subindex][0]){
-                            continue;
-                        }
-                        if (strcmp(item->valuestring, files[subindex][0]) == 0){
-                            found = true;
-                            total_files_size += files_len[subindex];
-                            files_indexes[index] = subindex;
-                            total_files++;
-                            break;
-                        }
+                    int file_index = filename_to_index(item->valuestring);
+                    if (file_index != -1){
+                        found = true;
+                        total_files_size += files_len[file_index];
+                        files_indexes[index] = file_index;
+                        total_files++;
                     }
+
                     if (!found){
                         printf("Model file is corrupted.\n");
+                        dprintf("Err code: 0_40\n");
                         exit(1);
                     }
                 }
 
-                float* floatarr = smalloc(total_files_size, allocname);
-                free(allocname);
+                float* floatarr = calloc(total_files_size, 1);
                 if (!floatarr){
                     printf("Failed to allocate memory to load model.\n");
                     exit(1);
@@ -2376,10 +2190,6 @@ int main(int argc, char** argv){
                     //Chars are only one byte and we wanna count in bytes here therefore let's make c
                     //shut the fuck up.
                     memcpy(((char*)floatarr) + curr_w, files[files_indexes[index]][1], files_len[files_indexes[index]]);
-                    free(files[files_indexes[index]][0]);
-                    free(files[files_indexes[index]][1]);
-                    files[files_indexes[index]][0] = NULL;
-                    files[files_indexes[index]][1] = NULL;
 
                     curr_w += files_len[files_indexes[index]];
                 }
@@ -2399,41 +2209,48 @@ int main(int argc, char** argv){
                 cJSON* layer_curr = cJSON_GetArrayItem(layers_raw, index);
                 if (!cJSON_IsObject(layer_curr)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_41\n");
                     return 1;
                 }
                 cJSON* weights_lc = cJSON_GetObjectItem(layer_curr, "weights");
                 if (!cJSON_IsObject(weights_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_42\n");
                     return 1;
                 }
                 cJSON* normalize_1_lc = cJSON_GetObjectItem(weights_lc, "normalize_1");
                 if (!cJSON_IsArray(normalize_1_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_43\n");
                     return 1;
                 }
-                layers[index].weights.normalize_1 = loadFloats(normalize_1_lc, mname("layers[%d].weights.normalize_1", index));
+                layers[index].weights.normalize_1 = loadFloats(normalize_1_lc);
                 
                 cJSON* normalize_2_lc = cJSON_GetObjectItem(weights_lc, "normalize_2");
                 if (!cJSON_IsArray(normalize_2_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_44\n");
                     return 1;
                 }
-                layers[index].weights.normalize_2 = loadFloats(normalize_2_lc, mname("layers[%d].weights.normalize_2", index));
+                layers[index].weights.normalize_2 = loadFloats(normalize_2_lc);
 
                 cJSON* attention_lc = cJSON_GetObjectItem(weights_lc, "attention");
                 if (!cJSON_IsObject(attention_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_45\n");
                     return 1;
                 }
 
                 cJSON* heads_lc = cJSON_GetObjectItem(attention_lc, "heads");
                 if (!cJSON_IsArray(heads_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_46\n");
                     return 1;
                 }
 
                 if (cJSON_GetArraySize(heads_lc) != heads){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_47\n");
                     return 1;
                 }
 
@@ -2446,6 +2263,7 @@ int main(int argc, char** argv){
                 for (int subindex = 0; subindex < heads; subindex++){
                     if (!cJSON_IsObject(cJSON_GetArrayItem(heads_lc, subindex))){
                         printf("Model file is corrupted.\n");
+                        dprintf("Err code: 0_48\n");
                         return 1;
                     }
                     cJSON* query_lh_lc = cJSON_GetObjectItem(cJSON_GetArrayItem(heads_lc, subindex), "query");
@@ -2453,31 +2271,36 @@ int main(int argc, char** argv){
                     cJSON* value_lh_lc = cJSON_GetObjectItem(cJSON_GetArrayItem(heads_lc, subindex), "value");
                     if (!cJSON_IsArray(query_lh_lc)){
                         printf("Model file is corrupted.\n");
+                        dprintf("Err code: 0_49\n");
                         return 1;
                     }
                     if (!cJSON_IsArray(key_lh_lc)){
                         printf("Model file is corrupted.\n");
+                        dprintf("Err code: 0_50\n");
                         return 1;
                     }
                     if (!cJSON_IsArray(value_lh_lc)){
                         printf("Model file is corrupted.\n");
+                        dprintf("Err code: 0_51\n");
                         return 1;
                     }
-                    layers[index].weights.attention.heads[subindex].query = loadFloats(query_lh_lc, mname("layers[%d].weights.attention.heads[%d].query", index, subindex));
-                    layers[index].weights.attention.heads[subindex].key = loadFloats(key_lh_lc, mname("layers[%d].weights.attention.heads[%d].key", index, subindex));
-                    layers[index].weights.attention.heads[subindex].value = loadFloats(value_lh_lc, mname("layers[%d].weights.attention.heads[%d].value", index, subindex));
+                    layers[index].weights.attention.heads[subindex].query = loadFloats(query_lh_lc);
+                    layers[index].weights.attention.heads[subindex].key = loadFloats(key_lh_lc);
+                    layers[index].weights.attention.heads[subindex].value = loadFloats(value_lh_lc);
                 }
                 
                 cJSON* attn_o_lc = cJSON_GetObjectItem(attention_lc, "output");
                 if (!cJSON_IsArray(attn_o_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_52\n");
                     return 1;
                 }
-                layers[index].weights.attention.output = loadFloats(attn_o_lc, mname("layers[%d].weights.attention.output", index));
+                layers[index].weights.attention.output = loadFloats(attn_o_lc);
 
                 cJSON* ffw_lc = cJSON_GetObjectItem(weights_lc, "feed_forward");
                 if (!cJSON_IsObject(ffw_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_53\n");
                     return 1;
                 }
 
@@ -2485,49 +2308,57 @@ int main(int argc, char** argv){
                 cJSON* ffw_shrink_lc = cJSON_GetObjectItem(ffw_lc, "shrink");
                 if (!cJSON_IsArray(ffw_grow_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_54\n");
                     return 1;
                 }
                 if (!cJSON_IsArray(ffw_shrink_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_55\n");
                     return 1;
                 }
-                layers[index].weights.feed_forward.grow = loadFloats(ffw_grow_lc, mname("layers[%d].weights.feed_forward.grow", index));
-                layers[index].weights.feed_forward.shrink = loadFloats(ffw_shrink_lc, mname("layers[%d].weights.feed_forward.shrink", index));
+                layers[index].weights.feed_forward.grow = loadFloats(ffw_grow_lc);
+                layers[index].weights.feed_forward.shrink = loadFloats(ffw_shrink_lc);
 
 
                 weights_lc = cJSON_GetObjectItem(layer_curr, "biases");
                 if (!cJSON_IsObject(weights_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_56\n");
                     return 1;
                 }
                 normalize_1_lc = cJSON_GetObjectItem(weights_lc, "normalize_1");
                 if (!cJSON_IsArray(normalize_1_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_57\n");
                     return 1;
                 }
-                layers[index].biases.normalize_1 = loadFloats(normalize_1_lc, mname("layers[%d].biases.normalize_1", index));
+                layers[index].biases.normalize_1 = loadFloats(normalize_1_lc);
 
                 normalize_2_lc = cJSON_GetObjectItem(weights_lc, "normalize_2");
                 if (!cJSON_IsArray(normalize_2_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_58\n");
                     return 1;
                 }
-                layers[index].biases.normalize_2 = loadFloats(normalize_2_lc, mname("layers[%d].biases.normalize_2", index));
+                layers[index].biases.normalize_2 = loadFloats(normalize_2_lc);
 
                 attention_lc = cJSON_GetObjectItem(weights_lc, "attention");
                 if (!cJSON_IsObject(attention_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_59\n");
                     return 1;
                 }
 
                 heads_lc = cJSON_GetObjectItem(attention_lc, "heads");
                 if (!cJSON_IsArray(heads_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_60\n");
                     return 1;
                 }
 
                 if (cJSON_GetArraySize(heads_lc) != heads){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_61\n");
                     return 1;
                 }
 
@@ -2540,6 +2371,7 @@ int main(int argc, char** argv){
                 for (int subindex = 0; subindex < heads; subindex++){
                     if (!cJSON_IsObject(cJSON_GetArrayItem(heads_lc, subindex))){
                         printf("Model file is corrupted.\n");
+                        dprintf("Err code: 0_62\n");
                         return 1;
                     }
                     cJSON* query_lh_lc = cJSON_GetObjectItem(cJSON_GetArrayItem(heads_lc, subindex), "query");
@@ -2547,31 +2379,36 @@ int main(int argc, char** argv){
                     cJSON* value_lh_lc = cJSON_GetObjectItem(cJSON_GetArrayItem(heads_lc, subindex), "value");
                     if (!cJSON_IsArray(query_lh_lc)){
                         printf("Model file is corrupted.\n");
+                        dprintf("Err code: 0_63\n");
                         return 1;
                     }
                     if (!cJSON_IsArray(key_lh_lc)){
                         printf("Model file is corrupted.\n");
+                        dprintf("Err code: 0_64\n");
                         return 1;
                     }
                     if (!cJSON_IsArray(value_lh_lc)){
                         printf("Model file is corrupted.\n");
+                        dprintf("Err code: 0_65\n");
                         return 1;
                     }
-                    layers[index].biases.attention.heads[subindex].query = loadFloats(query_lh_lc, mname("layers[%d].biases.attention.heads[%d].query", index, subindex));
-                    layers[index].biases.attention.heads[subindex].key = loadFloats(key_lh_lc, mname("layers[%d].biases.attention.heads[%d].key", index, subindex));
-                    layers[index].biases.attention.heads[subindex].value = loadFloats(value_lh_lc, mname("layers[%d].biases.attention.heads[%d].value", index, subindex));
+                    layers[index].biases.attention.heads[subindex].query = loadFloats(query_lh_lc);
+                    layers[index].biases.attention.heads[subindex].key = loadFloats(key_lh_lc);
+                    layers[index].biases.attention.heads[subindex].value = loadFloats(value_lh_lc);
                 }
 
                 attn_o_lc = cJSON_GetObjectItem(attention_lc, "output");
                 if (!cJSON_IsArray(attn_o_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_66\n");
                     return 1;
                 }
-                layers[index].biases.attention.output = loadFloats(attn_o_lc, mname("layers[%d].biases.attention.output", index));
+                layers[index].biases.attention.output = loadFloats(attn_o_lc);
 
                 ffw_lc = cJSON_GetObjectItem(weights_lc, "feed_forward");
                 if (!cJSON_IsObject(ffw_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_67\n");
                     return 1;
                 }
 
@@ -2579,18 +2416,21 @@ int main(int argc, char** argv){
                 ffw_shrink_lc = cJSON_GetObjectItem(ffw_lc, "shrink");
                 if (!cJSON_IsArray(ffw_grow_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_68\n");
                     return 1;
                 }
                 if (!cJSON_IsArray(ffw_shrink_lc)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_69\n");
                     return 1;
                 }
-                layers[index].biases.feed_forward.grow = loadFloats(ffw_grow_lc, mname("layers[%d].biases.feed_forward.grow", index));
-                layers[index].biases.feed_forward.shrink = loadFloats(ffw_shrink_lc, mname("layers[%d].biases.feed_forward.shrink", index));
+                layers[index].biases.feed_forward.grow = loadFloats(ffw_grow_lc);
+                layers[index].biases.feed_forward.shrink = loadFloats(ffw_shrink_lc);
             }
             cJSON* embeddings_raw = cJSON_GetObjectItem(transformer_structure, "embeddings");
             if (!cJSON_IsArray(embeddings_raw)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_70\n");
                 return 1;
             }
             int embeddings_raw_size = cJSON_GetArraySize(embeddings_raw);
@@ -2600,99 +2440,93 @@ int main(int argc, char** argv){
             }
             cJSON* curr_embedding_raw_item = cJSON_GetArrayItem(embeddings_raw, 0);
 
-            embeddings = calloc((vocab_len + gap_size) * sizeof(float*), 1);
+            embeddings = calloc(vocab_len * sizeof(float*), 1);
             if (!embeddings){
                 printf("Failed to allocate memory to load model.\n");
                 return 1;
             }
 
-            char* digits = malloc(11);
-            if (!digits){
-                printf("Failed memory allocation to load model.\n");
-                return 1;
-            }
-            strcpy(digits, "0123456789");
-
             for (int index = 0; index < embeddings_raw_size; index++){
                 if (!cJSON_IsArray(curr_embedding_raw_item)){
                     printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_71\n");
                     return 1;
                 }
-                //get id from filename
-                //we will hope id is consistent and the first number in the str of the filename.
-                if (!cJSON_IsString(cJSON_GetArrayItem(curr_embedding_raw_item, 0))){
-                    printf("Model file is corrupted.\n");
-                    return 1;
-                }
-                int curr_embedding_raw_item_filename_len = strlen(cJSON_GetArrayItem(curr_embedding_raw_item, 0)->valuestring);
-                if (curr_embedding_raw_item_filename_len == 0){
-                    printf("Model file is corrupted.\n");
-                    return 1;
-                }
-                char* num_ = malloc(32);
-                bool foundid = false;
-                
-                if (!num_){
-                    printf("Failed to allocate memory to load model.\n");
-                    return 1;
-                }
-                int cursor_ = 0;
-                for (int subindex = 0; subindex < curr_embedding_raw_item_filename_len; subindex++){
-                    char currchr = cJSON_GetArrayItem(curr_embedding_raw_item, 0)->valuestring[subindex];
-                    bool isdigit = false;
-                    for (int subsubindex = 0; subsubindex < 10; subsubindex++){
-                        if (digits[subsubindex] == currchr){
-                            isdigit = true;
-                            foundid = true;
-                            break;
-                        }
-                    }
-                    if (!isdigit){
-                        if (foundid){
-                            break;
-                        }
-                    }
-                    else{
-                        if (cursor_ < 31){
-                            num_[cursor_] = currchr;
-                            cursor_++;
-                        }
-                    }
-                }
-                if (!foundid){
-                    printf("Model file is corrupted.\n");
-                    return 1;
-                }
-                num_[cursor_] = '\0';
-                int id = atoi(num_);
-                free(num_);
-
-                if (!id_to_token(id)){
-                    printf("The model you are trying to load doesn't use the same vocabulary as yours.\n");
-                    return 1;
-                }
-
-                embeddings[id] = loadFloats(curr_embedding_raw_item, mname("embeddings[%d]", id));
+                embeddings[index] = loadFloats(curr_embedding_raw_item);
                 curr_embedding_raw_item = curr_embedding_raw_item->next;
             }
 
             cJSON* vocab_projection_raw = cJSON_GetObjectItem(transformer_structure, "vocab_projection");
             if (!cJSON_IsObject(vocab_projection_raw)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_75\n");
                 return 1;
             }
             cJSON* vocab_projection_raw_weights = cJSON_GetObjectItem(vocab_projection_raw, "weights");
             cJSON* vocab_projection_raw_biases = cJSON_GetObjectItem(vocab_projection_raw, "biases");
             if (!cJSON_IsArray(vocab_projection_raw_weights)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_76\n");
                 return 1;
             }
             if (!cJSON_IsArray(vocab_projection_raw_biases)){
                 printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_77\n");
                 return 1;
             }
-            vocab_projection.weights = loadFloats(vocab_projection_raw_weights, mname("vocab_projection.weights"));
-            vocab_projection.biases = loadFloats(vocab_projection_raw_biases, mname("vocab_projection.biases"));
+            
+            int vocab_projection_raw_weights_len = cJSON_GetArraySize(vocab_projection_raw_weights);
+            int vocab_projection_raw_biases_len = cJSON_GetArraySize(vocab_projection_raw_biases);
+
+            if (vocab_projection_raw_weights_len != vocab_len){
+                printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_76a\n");
+                return 1;
+            }
+            if (vocab_projection_raw_biases_len != vocab_len){
+                printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_77a\n");
+                return 1;
+            }
+
+            vocab_projection.weights = calloc(vocab_len * embeddingSize * 3, sizeof(float));
+            if (!vocab_projection.weights){
+                printf("Failed memory allocation to load model.\n");
+                return 1;
+            }
+            vocab_projection.biases  = calloc(vocab_len * 3, sizeof(float));
+            if (!vocab_projection.biases){
+                printf("Failed memory allocation to load model.\n");
+                return 1;
+            }
+
+            cJSON* curr = vocab_projection_raw_weights->child;
+            int wi = 0;
+            for (int index = 0; index < vocab_projection_raw_weights_len; index++, curr = curr->next){
+                if (!curr || !cJSON_IsArray(curr)){
+                    printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_78\n");
+                    return 1;
+                }
+                float* chunk = loadFloats(curr);
+                memcpy(&vocab_projection.weights[wi], chunk, embeddingSize * 3 * sizeof(float));
+                free(chunk);
+                wi += embeddingSize * 3;
+            }
+
+            curr = vocab_projection_raw_biases->child;
+            int bi = 0;
+            for (int index = 0; index < vocab_projection_raw_biases_len; index++, curr = curr->next){
+                if (!curr || !cJSON_IsArray(curr)){
+                    printf("Model file is corrupted.\n");
+                    dprintf("Err code: 0_82\n");
+                    return 1;
+                }
+                float* chunk = loadFloats(curr);
+                memcpy(&vocab_projection.biases[bi], chunk, 3 * sizeof(float));
+                free(chunk);
+                bi += 3;
+            }
 
             for (int index = 0; index < n_files; index++){
                 if (files[index][0]){
@@ -2704,199 +2538,13 @@ int main(int argc, char** argv){
                 free(files[index]);
             }
             free(files);
+            free(file_to_idx_sorted);
             free(files_len);
+            cJSON_Delete(model_meta);
             printf("Loaded model in %lldms.\n", timer_end(timer_));
         }
     }
 
-    float** calculate_positional_encoding(int sequence_length){
-        float** positional_encodings = malloc(sequence_length * sizeof(float*));
-        if (!positional_encodings){
-            printf("Failed to allocate memory to calculate positional encodings.\n");
-            exit(1);
-        }
-        for (int index = 0; index < sequence_length; index++){
-            positional_encodings[index] = malloc(embeddingSize * sizeof(float));
-            if (!positional_encodings[index]){
-                printf("Failed to allocate memory to calculate positional encodings.\n");
-                exit(1);
-            }
-            for (int subindex = 0; subindex < embeddingSize; subindex++){
-                float denominator = powf(10000.0f, (2.0f * floorf(subindex / 2.0f)) / (float)(embeddingSize));
-                if (subindex % 2 == 0){
-                    positional_encodings[index][subindex] = sinf(index / denominator);
-                }
-                else{
-                    positional_encodings[index][subindex] = cosf(index / denominator);
-                }
-            }
-        }
-        return positional_encodings;
-    }
-
-    float* get_embedding(int id){
-        if (!id_to_token(id)){
-            return NULL; //Invalid token.
-        }
-        return embeddings[id];
-    }
-
-    float* _calculate_x_hat_only(float* in, int in_len){
-        if (!in){
-            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
-            return NULL;
-        }
-        if (in_len < 1){
-            return NULL;
-        }
-        float mean = 0;
-        for (int index = 0; index < in_len; index++){
-            mean += in[index];
-        }
-        mean = mean / in_len;
-
-        float varience = 0;
-        for (int index = 0; index < in_len; index++){
-            varience += (in[index] - mean) * (in[index] - mean);
-        }
-        varience = varience / in_len;
-
-        float epsilon = 1e-8;
-        float std = sqrtf(varience + epsilon);
-        
-        float* x_hat = malloc(in_len * sizeof(float));
-        if (!x_hat){
-            printf("Failed memory allocation to calculate x hat.\n");
-            exit(1);
-        }
-        for (int index = 0; index < in_len; index++){
-            x_hat[index] = (in[index] - mean) / std;
-        }
-
-        return x_hat;
-    }
-
-    float* normalize_vector(float* vec, int vec_len, float* g, float* b){
-        if (!vec){
-            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
-            return NULL; //deref null is crazy work bro
-        }
-        if (vec_len < 1){
-            return NULL;
-        }
-        if (!g){
-            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
-            return NULL;
-        }
-        if (!b){
-            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
-            return NULL;
-        }
-        float* x_hat = _calculate_x_hat_only(vec, vec_len);
-        if (!x_hat){
-            printf("Failed to calculate x_hat.\n"); //In case physics have broken down or a bitflip or idk
-            exit(1);
-        }
-        for (int index = 0; index < vec_len; index++){
-            x_hat[index] = x_hat[index] * g[index * 3] + b[index * 3];
-        }
-
-        return x_hat;
-    }
-
-    float dot_product(float* vec1, int vec1_len, float* vec2, int vec2_len){
-        float sum = 0;
-        if (vec1_len != vec2_len){
-            return -1; //Bro what the fuck
-        }
-        if (vec1_len < 1){
-            return -1; //...
-        }
-        if (!vec1){
-            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
-            return -1; //dereference NULL is crazy work
-        }
-        if (!vec2){
-            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
-            return -1;
-        }
-        for (int index = 0; index < vec1_len; index++){
-            sum += vec1[index] * vec2[index];
-        }
-        return sum;
-    }
-
-    float* add_vectors(float* vec1, int vec1_len, float* vec2, int vec2_len){
-        if (vec1_len != vec2_len){
-            return NULL;
-        }
-        if (vec1_len < 1){
-            return NULL;
-        }
-        if (!vec1){
-            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
-            return NULL;
-        }
-        if (!vec2){
-            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
-            return NULL;
-        }
-
-        float* new_vec = malloc(vec1_len * sizeof(float));
-        if (!new_vec){
-            printf("Failed memory allocation to add vectors.\n");
-            exit(1);
-        }
-        
-        for (int index = 0; index < vec1_len; index++){
-            new_vec[index] = vec1[index] + vec2[index];
-        }
-
-        return new_vec;
-    }
-
-    float* softmax(float* vec, int vec_len){
-        if (!vec){
-            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
-            return NULL;
-        }
-        if (vec_len < 1){
-            return NULL;
-        }
-        
-        float max = -__FLT_MAX__;
-        for (int index = 0; index < vec_len; index++){
-            if (vec[index] > max){
-                max = vec[index];
-            }
-        }
-        
-        float* rets = malloc(vec_len * sizeof(float));
-        if (!rets){
-            printf("Failed memory allocation to do softmax.\n");
-            exit(1);
-        }
-        
-        for (int index = 0; index < vec_len; index++){
-            rets[index] = expf(vec[index] - max);
-        }
-
-        long double exp_sum = 0;
-        for (int index = 0; index < vec_len; index++){
-            exp_sum += rets[index];
-        }
-        if (exp_sum == 0){
-            for (int index = 0; index < vec_len; index++){
-                rets[index] = 1.0f / (float)(vec_len);
-            }
-            return rets;
-        }
-        for (int index = 0; index < vec_len; index++){
-            rets[index] = rets[index] / (float)(exp_sum);
-        }
-        return rets;
-    }
-    
     bool save(char* filepath){
         if (!filepath){
             printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
@@ -3089,10 +2737,7 @@ int main(int argc, char** argv){
         
         cJSON* embeddings_save = cJSON_CreateArray();
 
-        for (int index = 0; index < vocab_len + gap_size; index++){
-            if (!embeddings[index]){
-                continue;
-            }
+        for (int index = 0; index < vocab_len; index++){
             cJSON* embedding_curr_save = cJSON_CreateArray();
             char num__[32];
             itoa(index, num__, 10);
@@ -3109,8 +2754,23 @@ int main(int argc, char** argv){
         cJSON* vocab_projection_save_weights = cJSON_CreateArray();
         cJSON* vocab_projection_save_biases = cJSON_CreateArray();
 
-        cJSON_AddItemToArray(vocab_projection_save_weights, cJSON_CreateString("vocab_projection.weights"));
-        cJSON_AddItemToArray(vocab_projection_save_biases, cJSON_CreateString("vocab_projection.biases"));
+        for (int index = 0; index < vocab_len; index++){
+            cJSON* vocab_projection_raw_weights_curr = cJSON_CreateArray();
+            cJSON* vocab_projection_raw_biases_curr = cJSON_CreateArray();
+            char num__[32];
+            itoa(index, num__, 10);
+            char spath_curr[strlen(num__) + strlen("vocab_projection.weights[]") + 1];
+            sprintf(spath_curr, "vocab_projection.weights[%s]", num__);
+            
+            cJSON_AddItemToArray(vocab_projection_raw_weights_curr, cJSON_CreateString(spath_curr));
+
+            sprintf(spath_curr, "vocab_projection.biases[%s]", num__);
+
+            cJSON_AddItemToArray(vocab_projection_raw_biases_curr, cJSON_CreateString(spath_curr));
+
+            cJSON_AddItemToArray(vocab_projection_save_weights, vocab_projection_raw_weights_curr);
+            cJSON_AddItemToArray(vocab_projection_save_biases, vocab_projection_raw_biases_curr);
+        }
 
         cJSON_AddItemToObject(vocab_projection_save, "weights", vocab_projection_save_weights);
         cJSON_AddItemToObject(vocab_projection_save, "biases", vocab_projection_save_biases);
@@ -3121,6 +2781,9 @@ int main(int argc, char** argv){
 
         char* model_meta_save = cJSON_PrintUnformatted(model_meta_root);
         size_t model_meta_save_len = strlen(model_meta_save);
+
+        dprintf("Size of model_meta.json: %zu bytes.\n", model_meta_save_len);
+
         cJSON_Delete(model_meta_root);
 
         //now zip it
@@ -3132,13 +2795,11 @@ int main(int argc, char** argv){
             return false;
         }
 
-        if (!mz_zip_writer_add_mem(&zipfile, "model_meta.json", model_meta_save, model_meta_save_len, MZ_BEST_COMPRESSION)){
+        if (!mz_zip_writer_add_mem(&zipfile, "model_meta.json", model_meta_save, model_meta_save_len, MZ_NO_COMPRESSION)){
             printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
             mz_zip_writer_end(&zipfile);
             return false;
         }
-
-        free(model_meta_save);
 
         for (int index = 0; index < layersAmount; index++){
             char _num[32];
@@ -3146,7 +2807,7 @@ int main(int argc, char** argv){
             char normalize_path[strlen(_num) + strlen("layers[].weights.normalize_1") + 1];
             sprintf(normalize_path, "layers[%s].weights.normalize_1", _num);
 
-            if (!mz_zip_writer_add_mem(&zipfile, normalize_path, layers[index].weights.normalize_1, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, normalize_path, layers[index].weights.normalize_1, embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
@@ -3154,7 +2815,7 @@ int main(int argc, char** argv){
 
             sprintf(normalize_path, "layers[%s].weights.normalize_2", _num);
 
-            if (!mz_zip_writer_add_mem(&zipfile, normalize_path, layers[index].weights.normalize_2, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, normalize_path, layers[index].weights.normalize_2, embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
@@ -3166,21 +2827,21 @@ int main(int argc, char** argv){
                 char head_data_path[strlen(_num) + strlen(_num2) + strlen("layers[].weights.attention.heads[].query") + 1];
                 sprintf(head_data_path, "layers[%s].weights.attention.heads[%s].query", _num, _num2);
 
-                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].query, embeddingSize * embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].query, embeddingSize * embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
                     return false;
                 }
 
                 sprintf(head_data_path, "layers[%s].weights.attention.heads[%s].key", _num, _num2);
-                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].key, embeddingSize * embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].key, embeddingSize * embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
                     return false;
                 }
 
                 sprintf(head_data_path, "layers[%s].weights.attention.heads[%s].value", _num, _num2);
-                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].value, embeddingSize * embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].value, embeddingSize * embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
                     return false;
@@ -3189,7 +2850,7 @@ int main(int argc, char** argv){
 
             char attn_o_path[strlen(_num) + strlen("layers[].weights.attention.output") + 1];
             sprintf(attn_o_path, "layers[%s].weights.attention.output", _num);
-            if (!mz_zip_writer_add_mem(&zipfile, attn_o_path, layers[index].weights.attention.output, embeddingSize * (embeddingSize * heads) * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, attn_o_path, layers[index].weights.attention.output, embeddingSize * (embeddingSize * heads) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
@@ -3197,14 +2858,14 @@ int main(int argc, char** argv){
 
             char ffw_paths[strlen(_num) + strlen("layers[].weights.feed_forward.shrink") + 1];
             sprintf(ffw_paths, "layers[%s].weights.feed_forward.grow", _num);
-            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths, layers[index].weights.feed_forward.grow, embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths, layers[index].weights.feed_forward.grow, embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
 
             sprintf(ffw_paths, "layers[%s].weights.feed_forward.shrink", _num);
-            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths, layers[index].weights.feed_forward.shrink, embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths, layers[index].weights.feed_forward.shrink, embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
@@ -3216,7 +2877,7 @@ int main(int argc, char** argv){
             char normalize_path_[strlen(_num) + strlen("layers[].biases.normalize_1") + 1];
             sprintf(normalize_path_, "layers[%s].biases.normalize_1", _num);
 
-            if (!mz_zip_writer_add_mem(&zipfile, normalize_path_, layers[index].biases.normalize_1, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, normalize_path_, layers[index].biases.normalize_1, embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
@@ -3224,7 +2885,7 @@ int main(int argc, char** argv){
 
             sprintf(normalize_path_, "layers[%s].biases.normalize_2", _num);
 
-            if (!mz_zip_writer_add_mem(&zipfile, normalize_path_, layers[index].biases.normalize_2, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, normalize_path_, layers[index].biases.normalize_2, embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
@@ -3236,21 +2897,21 @@ int main(int argc, char** argv){
                 char head_data_path[strlen(_num) + strlen(_num2) + strlen("layers[].biases.attention.heads[].query") + 1];
                 sprintf(head_data_path, "layers[%s].biases.attention.heads[%s].query", _num, _num2);
 
-                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].query, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].query, embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
                     return false;
                 }
 
                 sprintf(head_data_path, "layers[%s].biases.attention.heads[%s].key", _num, _num2);
-                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].key, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].key, embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
                     return false;
                 }
 
                 sprintf(head_data_path, "layers[%s].biases.attention.heads[%s].value", _num, _num2);
-                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].value, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].value, embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
                     return false;
@@ -3259,7 +2920,7 @@ int main(int argc, char** argv){
 
             char attn_o_path_[strlen(_num) + strlen("layers[].biases.attention.output") + 1];
             sprintf(attn_o_path_, "layers[%s].biases.attention.output", _num);
-            if (!mz_zip_writer_add_mem(&zipfile, attn_o_path_, layers[index].biases.attention.output, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, attn_o_path_, layers[index].biases.attention.output, embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
@@ -3267,46 +2928,51 @@ int main(int argc, char** argv){
 
             char ffw_paths_[strlen(_num) + strlen("layers[].biases.feed_forward.shrink") + 1];
             sprintf(ffw_paths_, "layers[%s].biases.feed_forward.grow", _num);
-            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths_, layers[index].biases.feed_forward.grow, (embeddingSize * 4) * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths_, layers[index].biases.feed_forward.grow, (embeddingSize * 4) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
 
             sprintf(ffw_paths_, "layers[%s].biases.feed_forward.shrink", _num);
-            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths_, layers[index].biases.feed_forward.shrink, embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths_, layers[index].biases.feed_forward.shrink, embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
         }
 
-        for (int index = 0; index < vocab_len + gap_size; index++){
-            if (!id_to_token(index)){
-                continue; //skip gaps
-            }
+        for (int index = 0; index < vocab_len; index++){
             char _num[32];
             itoa(index, _num, 10);
             char embeddingPath[strlen(_num) + strlen("embeddings[]") + 1];
             sprintf(embeddingPath, "embeddings[%s]", _num);
 
-            if (!mz_zip_writer_add_mem(&zipfile, embeddingPath, embeddings[index], embeddingSize * sizeof(float), MZ_BEST_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, embeddingPath, embeddings[index], embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
         }
 
-        if (!mz_zip_writer_add_mem(&zipfile, "vocab_projection.weights", vocab_projection.weights, vocab_len * embeddingSize * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
-            printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
-            mz_zip_writer_end(&zipfile);
-            return false;
-        }
+        for (int index = 0; index < vocab_len; index++){
+            char _num[32];
+            itoa(index, _num, 10);
+            char vocab_projection_path[strlen(_num) + strlen("vocab_projection.weights[]") + 1];
+            sprintf(vocab_projection_path, "vocab_projection.weights[%s]", _num);
 
-        if (!mz_zip_writer_add_mem(&zipfile, "vocab_projection.biases", vocab_projection.biases, vocab_len * 3 * sizeof(float), MZ_BEST_COMPRESSION)){
-            printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
-            mz_zip_writer_end(&zipfile);
-            return false;
+            if (!mz_zip_writer_add_mem(&zipfile, vocab_projection_path, &vocab_projection.weights[index * (3 * embeddingSize)], 3 * embeddingSize * sizeof(float), MZ_NO_COMPRESSION)){
+                printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                mz_zip_writer_end(&zipfile);
+                return false;
+            }
+
+            sprintf(vocab_projection_path, "vocab_projection.biases[%s]", _num);
+            if (!mz_zip_writer_add_mem(&zipfile, vocab_projection_path, &vocab_projection.biases[index * 3], 3 * sizeof(float), MZ_NO_COMPRESSION)){
+                printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                mz_zip_writer_end(&zipfile);
+                return false;
+            }
         }
 
         if (!mz_zip_writer_finalize_archive(&zipfile)) {
@@ -3316,18 +2982,883 @@ int main(int argc, char** argv){
         }
 
         mz_zip_writer_end(&zipfile);
+        free(model_meta_save);
 
         printf("Saved model at path \"%s\" in %lldms.\n", filepath, timer_end(save_timer));
 
         return true;
     }
-    save("bruh.zip");
-    return 0;
+
+    float** calculate_positional_encoding(int sequence_length){
+        float** positional_encodings = malloc(sequence_length * sizeof(float*));
+        if (!positional_encodings){
+            printf("Failed to allocate memory to calculate positional encodings.\n");
+            exit(1);
+        }
+        for (int index = 0; index < sequence_length; index++){
+            positional_encodings[index] = malloc(embeddingSize * sizeof(float));
+            if (!positional_encodings[index]){
+                printf("Failed to allocate memory to calculate positional encodings.\n");
+                exit(1);
+            }
+            for (int subindex = 0; subindex < embeddingSize; subindex++){
+                float denominator = powf(10000.0f, (2.0f * floorf(subindex / 2.0f)) / (float)(embeddingSize));
+                if (subindex % 2 == 0){
+                    positional_encodings[index][subindex] = sinf(index / denominator);
+                }
+                else{
+                    positional_encodings[index][subindex] = cosf(index / denominator);
+                }
+            }
+        }
+        return positional_encodings;
+    }
+
+    float* get_embedding(int id){
+        if (!id_to_token(id)){
+            return NULL; //Invalid token.
+        }
+        return embeddings[id];
+    }
+
+    float* _calculate_x_hat_only(float* in, int in_len){
+        if (!in){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL;
+        }
+        if (in_len < 1){
+            return NULL;
+        }
+        float mean = 0;
+        for (int index = 0; index < in_len; index++){
+            mean += in[index];
+        }
+        mean = mean / in_len;
+
+        float varience = 0;
+        for (int index = 0; index < in_len; index++){
+            varience += (in[index] - mean) * (in[index] - mean);
+        }
+        varience = varience / in_len;
+
+        float epsilon = 1e-8;
+        float std = sqrtf(varience + epsilon);
+        
+        float* x_hat = malloc(in_len * sizeof(float));
+        if (!x_hat){
+            printf("Failed memory allocation to calculate x hat.\n");
+            exit(1);
+        }
+        for (int index = 0; index < in_len; index++){
+            x_hat[index] = (in[index] - mean) / std;
+        }
+
+        return x_hat;
+    }
+
+    float* normalize_vector(float* vec, int vec_len, float* g, float* b){
+        if (!vec){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL; //deref null is crazy work bro
+        }
+        if (vec_len < 1){
+            return NULL;
+        }
+        if (!g){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL;
+        }
+        if (!b){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL;
+        }
+        float* x_hat = _calculate_x_hat_only(vec, vec_len);
+        if (!x_hat){
+            printf("Failed to calculate x_hat.\n"); //In case physics have broken down or a bitflip or idk
+            exit(1);
+        }
+        for (int index = 0; index < vec_len; index++){
+            x_hat[index] = x_hat[index] * g[index * 3] + b[index * 3];
+        }
+
+        return x_hat;
+    }
+
+    float dot_product(float* vec1, int vec1_len, float* vec2, int vec2_len){
+        float sum = 0;
+        if (vec1_len != vec2_len){
+            return -1; //Bro what the fuck
+        }
+        if (vec1_len < 1){
+            return -1; //...
+        }
+        if (!vec1){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return -1; //dereference NULL is crazy work
+        }
+        if (!vec2){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return -1;
+        }
+        for (int index = 0; index < vec1_len; index++){
+            sum += vec1[index] * vec2[index];
+        }
+        return sum;
+    }
+
+    float* add_vectors(float* vec1, int vec1_len, float* vec2, int vec2_len){
+        if (vec1_len != vec2_len){
+            return NULL;
+        }
+        if (vec1_len < 1){
+            return NULL;
+        }
+        if (!vec1){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL;
+        }
+        if (!vec2){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL;
+        }
+
+        float* new_vec = malloc(vec1_len * sizeof(float));
+        if (!new_vec){
+            printf("Failed memory allocation to add vectors.\n");
+            exit(1);
+        }
+        
+        for (int index = 0; index < vec1_len; index++){
+            new_vec[index] = vec1[index] + vec2[index];
+        }
+
+        return new_vec;
+    }
+
+    float* softmax(float* vec, int vec_len, float* new_vec_ptr){
+        if (!vec){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL;
+        }
+        if (!new_vec_ptr){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return NULL;
+        }
+        if (vec_len < 1){
+            return NULL;
+        }
+        
+        float max = -__FLT_MAX__;
+        for (int index = 0; index < vec_len; index++){
+            if (vec[index] > max){
+                max = vec[index];
+            }
+        }
+        
+        float* rets = new_vec_ptr;
+        
+        for (int index = 0; index < vec_len; index++){
+            rets[index] = expf(vec[index] - max);
+        }
+
+        long double exp_sum = 0;
+        for (int index = 0; index < vec_len; index++){
+            exp_sum += rets[index];
+        }
+        if (exp_sum == 0){
+            for (int index = 0; index < vec_len; index++){
+                rets[index] = 1.0f / (float)(vec_len);
+            }
+            return rets;
+        }
+        for (int index = 0; index < vec_len; index++){
+            rets[index] = rets[index] / (float)(exp_sum);
+        }
+        return rets;
+    }
+
+    float calculate_loss(float* vec, int vec_len, int target){
+        if (!vec){
+            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
+            return 0;
+        }
+        if (vec_len < 1){
+            return 0;
+        }
+
+        if (!id_to_token(target)){
+            return 0;
+        }
+
+        float* predicted_probs = softmax(vec, vec_len);
+        if (!predicted_probs){
+            printf("Failed to allocate memory to calculate loss.\n");
+            exit(1);
+        }
+        float epsilon = antiOverfittingOptimisations ? 0.1f : 0;
+
+        float loss = 0;
+        for (int index = 0; index < vocab_len; index++){
+            if (predicted_probs[index] > 0){
+                loss -= (index == target ? 1.0f - epsilon : epsilon / (vocab_len - 1)) * logf(predicted_probs[index]);
+            }
+        }
+        free(predicted_probs);
+        return loss;
+    }
+
+    typedef struct {
+        float** norm1_x_hat;
+        struct {
+            float** q_vectors;
+            float** k_vectors;
+            float** v_vectors;
+            float** attention_scores;
+            float** attention_probs;
+            float** output;
+        }* heads;
+        float** combined;
+        float** norm2_x_hat;
+        float** normalized;
+        struct {
+            float** bigger;
+            float** after_relu;
+            float** final;
+        } feed_forward;
+    } layer_cache_entry;
+
+    typedef struct {
+        int* token_ids;
+        struct {
+            int* tokenized;
+            float** initial_embeddings;
+            float** positional_encodings;
+            layer_cache_entry* layers;
+        } cache;
+        bool success;
+    } infret;
+
+    infret inference(char* context, bool return_cache){
+        //Memory tracking system
+        void** tracked = NULL;
+        size_t tracked_len = 0;
+
+        int cmp_ptr(const void* a, const void* b){
+            void* pa = *(void**)a;
+            void* pb = *(void**)b;
+            return (pa > pb) - (pa < pb); // or: return (uintptr_t)pa - (uintptr_t)pb;
+        }
+
+        void sort_tracked(){
+            qsort(tracked, tracked_len, sizeof(void*), cmp_ptr);
+        }
+
+        ssize_t binary_search_tracked(void* key){
+            size_t left = 0;
+            size_t right = tracked_len;
+
+            while (left < right) {
+                size_t mid = left + (right - left) / 2;
+                void* mid_ptr = tracked[mid];
+
+                if (key == mid_ptr) {
+                    return (ssize_t)mid;
+                } else if (key < mid_ptr) {
+                    right = mid;
+                } else {
+                    left = mid + 1;
+                }
+            }
+            return -1;
+        }
+
+        void* track(void* ptr, char* failed_task){
+            if (!ptr){
+                //Failed alloc = no memory = can't do anything anyways = should exit.
+                failed_alloc(failed_task);
+            }
+            tracked_len++;
+            void** tmp = realloc(tracked, tracked_len * sizeof(void*));
+            if (!tmp){
+                printf("Failed to allocate memory to update freelist.\n");
+                tracked_len--;
+                free(ptr);
+                return NULL;
+            }
+            tracked = tmp;
+            tracked[tracked_len - 1] = ptr;
+            sort_tracked();
+            return ptr;
+        }
+
+        void cleanup(){
+            for (int index = 0; index < tracked_len; index++){
+                free(tracked[index]);
+            }
+            free(tracked);
+            tracked = NULL;
+            tracked_len = 0;
+            return;
+        }
+
+        bool untrack(void* ptr){
+            ssize_t index_ptr = binary_search_tracked(ptr);
+            if (index_ptr == -1){
+                return false;
+            }
+
+            tracked_len--;
+            void** new = malloc(tracked_len * sizeof(void**));
+            if (!new){
+                tracked_len++;
+                return false;
+            }
+
+            bool offset = false;
+            for (ssize_t index = 0; index < tracked_len + 1; index++){
+                if (index == index_ptr){
+                    offset = true;
+                    continue;
+                }
+                if (!offset){
+                    new[index] = tracked[index];
+                }
+                else{
+                    new[index - 1] = tracked[index];
+                }
+            }
+
+            free(tracked);
+            tracked = new;
+            return true;
+        }
+
+        //Failed alloc procedure.
+        void failed_alloc(char* failed_task){
+            printf("%s.\n", failed_task);
+            exit(1); //let os reclaim memory lol
+        }
+
+        printf("Doing inference...\n");
+        long long timer_ = timer();
+        
+        infret rets = {0}; //zero every field
+
+        long long subtimer = timer();
+        printf("Tokenizing input context...\n");
+        int* tokenized = track(tokenize(context), "Failed to tokenize input context.");
+        printf("Tokenized input context in %lldms.\n", timer_end(subtimer));
+        //tokenized[0] is length.
+        if (tokenized[0] > contextSize){
+            printf("Provided context is larger than context size, cannot proceed.\n");
+            rets.success = false;
+            cleanup();
+            return rets;
+        }
+        
+        subtimer = timer();
+        printf("Computing positional encodings...\n");
+        float** positional_encodings;
+        if (return_cache){
+            rets.cache.tokenized = tokenized;
+            untrack(tokenized);
+            rets.cache.positional_encodings = calculate_positional_encoding(tokenized[0]);
+            if (!rets.cache.positional_encodings){
+                failed_alloc("Failed to compute positional encodings.");
+            }
+            positional_encodings = rets.cache.positional_encodings;
+        }
+        else{
+            positional_encodings = track(calculate_positional_encoding(tokenized[0]), "Failed to compute positional encodings.");
+        }
+        printf("Computed positional encodings in %lldms.\n", timer_end(subtimer));
+
+        subtimer = timer();
+        printf("Computing final embeddings...\n");
+        
+        if (return_cache){
+            rets.cache.initial_embeddings = calloc(tokenized[0] * sizeof(float*), 1);
+            if (!rets.cache.initial_embeddings){
+                failed_alloc("Failed memory allocation to store cache initial embeddings.");
+            }
+        }
+
+        float** final_embeddings = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute final embeddings.");
+
+        for (int index = 1; index < tokenized[0] + 1; index++){
+            char* token = id_to_token(tokenized[index]);
+            int token_id = tokenized[index];
+            float* embedding = get_embedding(token_id);
+            float* final_embedding = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to process embeddings.");
+            float* initial_embedding;
+            if (return_cache){
+                initial_embedding = calloc(embeddingSize * sizeof(float), 1);
+                if (!initial_embedding){
+                    failed_alloc("Failed to allocate memory to process embeddings.");
+                }
+            }
+
+            for (int subindex = 0; subindex < embeddingSize; subindex++){
+                final_embedding[subindex] = embedding[subindex * 3];
+                if (return_cache){
+                    initial_embedding[subindex] = embedding[subindex * 3];
+                }
+            }
+            
+            if (return_cache){
+                rets.cache.initial_embeddings[index - 1] = initial_embedding;
+            }
+
+            float* positional_enc = positional_encodings[index - 1];
+            for (int subindex = 0; subindex < embeddingSize; subindex++){
+                final_embedding[subindex] += positional_enc[subindex];
+            }
+            
+            final_embeddings[index - 1] = final_embedding;
+        }
+
+        printf("Computed final embeddings in %lldms.\n", timer_end(subtimer));
+
+        long long layerstimer = timer();
+        printf("Computing layers...\n");
+        if (return_cache){
+            rets.cache.layers = calloc(layersAmount * sizeof(layer_cache_entry), 1);
+            if (!rets.cache.layers){
+                failed_alloc("Failed to allocate memory to compute layers.");
+            }
+        }
+        for (int layer = 0; layer < layersAmount; layer++){
+            long long layertimer = timer();
+            printf("Computing layer %d/%d...\n", layer, layersAmount);
+            
+            float** normalized_embeddings = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute normalized embeddings.");
+
+            float* norm1_weights = layers[layer].weights.normalize_1;
+            float* norm1_biases = layers[layer].biases.normalize_1;
+
+            if (return_cache){
+                rets.cache.layers[layer].norm1_x_hat = malloc(tokenized[0] * sizeof(float*));
+                if (!rets.cache.layers[layer].norm1_x_hat){
+                    failed_alloc("Failed to allocate memory to cache normalize 1 x hats.");
+                }
+            }
+
+            for (int index = 0; index < tokenized[0]; index++){
+                float* x_hat_for_cache_1;
+                if (return_cache){
+                    x_hat_for_cache_1 = _calculate_x_hat_only(final_embeddings[index], embeddingSize);
+                
+                    if (!x_hat_for_cache_1){
+                        failed_alloc("Failed to compute x hat for cache 1.");
+                    }
+                    rets.cache.layers[layer].norm1_x_hat[index] = x_hat_for_cache_1;
+                }
+
+                float* final_norm_1_output = normalize_vector(final_embeddings[index], embeddingSize, norm1_weights, norm1_biases);
+
+                if (!final_norm_1_output){
+                    failed_alloc("Failed to compute x hat for cache 1.");
+                }
+
+                normalized_embeddings[index] = final_norm_1_output;
+            }
+
+            //TODO:Free normalized_embeddings at the end only if return_cache is false
+            if (return_cache){
+                rets.cache.layers[layer].normalized = normalized_embeddings;
+            }
+
+            float*** head_outputs = track(malloc(heads * sizeof(float**)), "Failed to allocate memory to store head outputs."); //too many pointers i swear
+
+            for (int index = 0; index < heads; index++){
+                if (return_cache){
+                    head_outputs[index] = malloc(tokenized[0] * sizeof(float*));
+                    if (!head_outputs[index]){
+                        failed_alloc("Failed to allocate memory to store head outputs.");
+                    }
+                }
+                else{
+                    head_outputs[index] = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store head outputs.");
+                }
+                for (int subindex = 0; subindex < tokenized[0]; subindex++){
+                    if (return_cache){
+                        head_outputs[index][subindex] = calloc(embeddingSize * sizeof(float), 1);
+                        if (!head_outputs[index][subindex]){
+                            failed_alloc("Failed to allocate memory to store head outputs.");
+                        }
+                    }
+                    else{
+                        head_outputs[index][subindex] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to store head outputs.");
+                    }
+                }
+            }
+            
+            for (int head = 0; head < heads; head++){
+                float** q_vectors = NULL;
+                float** k_vectors = NULL;
+                float** v_vectors = NULL;
+                if (return_cache){
+                    q_vectors = malloc(tokenized[0] * sizeof(float*));
+                    k_vectors = malloc(tokenized[0] * sizeof(float*));
+                    v_vectors = malloc(tokenized[0] * sizeof(float*));
+
+                    if ((!q_vectors) || (!k_vectors) || (!v_vectors)){
+                        failed_alloc("Failed to allocate memory to store q/k/v vectors.");
+                    }
+                }
+                else{
+                    q_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store q vectors.");
+                    k_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store k vectors.");
+                    v_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store v vectors.");
+                }
+
+                for (int index = 0; index < tokenized[0]; index++){
+                    if (return_cache){
+                        q_vectors[index] = calloc(embeddingSize * sizeof(float), 1);
+                        k_vectors[index] = calloc(embeddingSize * sizeof(float), 1);
+                        v_vectors[index] = calloc(embeddingSize * sizeof(float), 1);
+
+                        if ((!q_vectors[index]) || (!k_vectors[index]) || (!v_vectors[index])){
+                            failed_alloc("Failed to allocate memory to store q/k/v vectors.");
+                        }
+                    }
+                    else{
+                        q_vectors[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to store q vectors.");
+                        k_vectors[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to store k vectors.");
+                        v_vectors[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to store v vectors.");
+                    }
+                }
+
+                float** attention_scores = NULL;
+                if (return_cache){
+                    attention_scores = malloc(tokenized[0] * sizeof(float*));
+                    if (!attention_scores){
+                        failed_alloc("Failed to allocate memory to store attention scores.");
+                    }
+                }
+                else{
+                    attention_scores = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store attention scores.");
+                }
+
+                for (int index = 0; index < tokenized[0]; index++){
+                    if (return_cache){
+                        attention_scores[index] = calloc(tokenized[0] * sizeof(float), 1);
+                        if (!attention_scores[index]){
+                            failed_alloc("Failed to allocate memory to store attention scores.");
+                        }
+                    }
+                    else{
+                        attention_scores[index] = track(calloc(tokenized[0] * sizeof(float), 1), "Failed to allocate memory to store attention scores.");
+                    }
+                }
+
+                float** attention_probs = NULL;
+                if (return_cache){
+                    attention_probs = malloc(tokenized[0] * sizeof(float*));
+                    if (!attention_probs){
+                        failed_alloc("Failed to allocate memory to store attention probs.");
+                    }
+                }
+                else{
+                    attention_probs = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store attention probs.");
+                }
+
+                for (int index = 0; index < tokenized[0]; index++){
+                    if (return_cache){
+                        attention_probs[index] = calloc(tokenized[0] * sizeof(float), 1);
+                        if (!attention_probs[index]){
+                            failed_alloc("Failed to allocate memory to store attention probs.");
+                        }
+                    }
+                    else{
+                        attention_probs[index] = track(calloc(tokenized[0] * sizeof(float), 1), "Failed to allocate memory to store attention probs.");
+                    }
+                }
+
+                float** post_attention_vectors = NULL;
+                if (return_cache){
+                    post_attention_vectors = malloc(tokenized[0] * sizeof(float*));
+                    if (!post_attention_vectors){
+                        failed_alloc("Failed to allocate memory to store post attention vectors.");
+                    }
+                }
+                else{
+                    post_attention_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store post attention vectors.");
+                }
+
+                for (int index = 0; index < tokenized[0]; index++){
+                    if (return_cache){
+                        post_attention_vectors[index] = calloc(embeddingSize * sizeof(float), 1);
+                        if (!post_attention_vectors[index]){
+                            failed_alloc("Failed to allocate memory to store post attention vectors.");
+                        }
+                    }
+                    else{
+                        post_attention_vectors[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to store post attention vectors.");
+                    }
+                }
+
+                typeof(layers[layer].weights.attention.heads[head]) head_weights = layers[layer].weights.attention.heads[head];
+                typeof(layers[layer].biases.attention.heads[head]) head_biases = layers[layer].biases.attention.heads[head];
+
+                float* head_query_weights = head_weights.query;
+                float* head_key_weights = head_weights.key;
+                float* head_value_weights = head_weights.value;
+
+                float* head_query_biases = head_biases.query;
+                float* head_key_biases = head_biases.key;
+                float* head_value_biases = head_biases.value;
+
+                for (int index = 0; index < tokenized[0]; index++){
+                    float* token_embedding = normalized_embeddings[index];
+                    // Q
+                    for (int pos = 0; pos < embeddingSize; pos++){
+                        float q_sum = 0;
+                        for (int subindex = 0; subindex < embeddingSize; subindex++){
+                            q_sum += token_embedding[subindex] * head_query_weights[pos * embeddingSize * 3 + subindex * 3];
+                        }
+                        q_vectors[index][pos] = q_sum + head_query_biases[pos * 3];
+                    }
+                    // K
+                    for (int pos = 0; pos < embeddingSize; pos++){
+                        float k_sum = 0;
+                        for (int subindex = 0; subindex < embeddingSize; subindex++){
+                            k_sum += token_embedding[subindex] * head_key_weights[pos * embeddingSize * 3 + subindex * 3];
+                        }
+                        k_vectors[index][pos] = k_sum + head_key_biases[pos * 3];
+                    }
+
+                    // V
+                    for (int pos = 0; pos < embeddingSize; pos++){
+                        float v_sum = 0;
+                        for (int subindex = 0; subindex < embeddingSize; subindex++){
+                            v_sum += token_embedding[subindex] * head_value_weights[pos * embeddingSize * 3 + subindex * 3];
+                        }
+                        v_vectors[index][pos] = v_sum + head_value_biases[pos * 3];
+                    }
+                }
+                
+                //Attention scores
+                for (int index = 0; index < tokenized[0]; index++){
+                    for (int subindex = 0; subindex < tokenized[0]; subindex++){
+                        if (subindex > index){
+                            attention_scores[index][subindex] = -1e9f;
+                            continue;
+                        }
+                        attention_scores[index][subindex] = dot_product(q_vectors[index], embeddingSize, k_vectors[subindex], embeddingSize);
+                    }
+                }
+
+                for (int index = 0; index < tokenized[0]; index++){
+                    for (int subindex = 0; subindex < tokenized[0]; subindex++){
+                        if (attention_scores[index][subindex] != -1e9f){
+                            attention_scores[index][subindex] /= sqrtf(embeddingSize);
+                        }
+                    }
+                }
+
+                for (int index = 0; index < tokenized[0]; index++){
+                    attention_probs[index] = softmax(attention_scores[index], tokenized[0], attention_probs[index]);
+                }
+
+                for (int index = 0; index < tokenized[0]; index++){
+                    for (int subindex = 0; subindex < embeddingSize; subindex++){
+                        for (int subindex_ = 0; subindex_ < tokenized[0]; subindex_++){
+                            post_attention_vectors[index][subindex] += v_vectors[subindex_][subindex] * attention_probs[index][subindex_];
+                        }
+                    }
+                }
+
+                if (return_cache){
+                    rets.cache.layers[index].heads[head].q_vectors = q_vectors;
+                    rets.cache.layers[index].heads[head].k_vectors = k_vectors;
+                    rets.cache.layers[index].heads[head].v_vectors = v_vectors;
+                    rets.cache.layers[index].heads[head].attention_scores = attention_scores;
+                    rets.cache.layers[index].heads[head].attention_probs = attention_probs;
+                    rets.cache.layers[index].heads[head].output = post_attention_vectors;
+                }
+            }
+
+            float** combined_vectors = NULL;
+            if (return_cache){
+                combined_vectors = malloc(tokenized[0] * sizeof(float*));
+                if (!combined_vectors){
+                    failed_alloc("Failed to allocate memory to store combined vectors.");
+                }
+            }
+            else{
+                combined_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store combined vectors.");
+            }
+
+            for (int index = 0; index < tokenized[0]; index++){
+                if (return_cache){
+                    combined_vectors[index] = calloc(embeddingSize * sizeof(float), 1);
+                    if (!combined_vectors[index]){
+                        failed_alloc("Failed to allocate memory to store combined vectors.");
+                    }
+                }
+                else{
+                    combined_vectors[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to store combined vectors.");
+                }
+            }
+
+            float* concatenated = calloc(embeddingSize * heads * sizeof(float), 1);
+            if (!concatenated){
+                failed_alloc("Failed to allocate memory to store concatenated heads.");
+            }
+            float* output_vector = calloc(embeddingSize * sizeof(float), 1);
+            if (!output_vector){
+                failed_alloc("Failed to allocate memory to store output vector.");
+            }
+            
+            float* output_weights = layers[layer].weights.attention.output;
+            float* output_biases = layers[layer].biases.attention.output;
+
+            for (int index = 0; index < tokenized[0]; index++){
+                int current_offset = 0;
+                for (int subindex = 0; subindex < heads; subindex++){
+                    memcpy(concatenated + current_offset, head_outputs[subindex][index], embeddingSize * sizeof(float));
+                    current_offset += embeddingSize;
+                }
+                for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    float pos_sum = 0;
+                    for (int subindex_ = 0; subindex_ < embeddingSize * heads; subindex_++){
+                        pos_sum += concatenated[subindex_] * output_weights[subindex * (embeddingSize * heads) * 3 + subindex_ * 3];
+                    }
+                    output_vector[subindex] = pos_sum + output_biases[subindex * 3];
+                }
+                memcpy(combined_vectors[index], output_vector, embeddingSize * sizeof(float));
+            }
+            free(output_vector);
+            free(concatenated);
+
+            if (return_cache){ //cache = training
+                float dropout_rate = 0;
+                if (antiOverfittingOptimisations){
+                    dropout_rate = 0.1;
+                }
+                if (dropout_rate > 0){
+                    for (int index = 0; index < tokenized[0]; index++){
+                        for (int subindex = 0; subindex < embeddingSize; subindex++){
+                            float range[] = {0, 0.99999994f};
+                            float random_n = random_range(range);
+                            if (random_n < dropout_rate){
+                                combined_vectors[index][subindex] = 0;
+                            }
+                            else{
+                                combined_vectors[index][subindex] /= (1 - dropout_rate);
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (int index = 0; index < tokenized[0]; index++){
+                for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    combined_vectors[index][subindex] += final_embeddings[index][subindex];
+                }
+            }
+
+            if (return_cache){
+                rets.cache.layers[layer].combined = combined_vectors;
+            }
+            
+            float* norm2_weights = layers[layer].weights.normalize_2;
+            float* norm2_biases = layers[layer].biases.normalize_2;
+
+            float** normalized_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store normalized vectors.");
+
+            if (return_cache){
+                rets.cache.layers[layer].norm2_x_hat = malloc(tokenized[0] * sizeof(float*));
+                if (!rets.cache.layers[layer].norm2_x_hat){
+                    failed_alloc("Failed to allocate memory to store norm 2 x hats.");
+                }
+            }
+
+            for (int index = 0; index < tokenized[0]; index++){
+                if (return_cache){
+                    float* norm2_x_hat = _calculate_x_hat_only(combined_vectors[index], embeddingSize);
+                    if (!norm2_x_hat){
+                        printf("Failed to compute norm 2 x hat.\n");
+                        exit(1);
+                    }
+                    rets.cache.layers[layer].norm2_x_hat[index] = norm2_x_hat;
+                }
+
+                float* final_norm2 = normalize_vector(combined_vectors[index], embeddingSize, norm2_weights, norm2_biases);
+                if (!final_norm2){
+                    printf("Failed to compute norm 2.\n");
+                    exit(1);
+                }
+
+                normalized_vectors[index] = final_norm2;
+            }
+
+            float** bigger_vectors = NULL;
+            if (return_cache){
+                bigger_vectors = malloc(tokenized[0] * sizeof(float*));
+                if (!bigger_vectors){
+                    failed_alloc("Failed to allocate memory to compute ffw grow.");
+                }
+            }
+            else{
+                bigger_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute ffw grow.");
+            }
+
+            if (return_cache){
+                for (int index = 0; index < tokenized[0]; index++){
+                    bigger_vectors[index] = calloc(embeddingSize * 4 * sizeof(float), 1);
+                    if (!bigger_vectors[index]){
+                        failed_alloc("Failed to allocate memory to compute ffw grow.");
+                    }
+                }
+            }
+            else{
+                for (int index = 0; index < tokenized[0]; index++){
+                    bigger_vectors[index] = track(calloc(embeddingSize * 4 * sizeof(float), 1), "Failed toa llocate memory to compute ffw grow.");
+                }
+            }
+
+            float* grow_weights = layers[layer].weights.feed_forward.grow;
+            float* grow_biases = layers[layer].biases.feed_forward.grow;
+            for (int index = 0; index < tokenized[0]; index++){
+                for (int subindex = 0; subindex < embeddingSize * 4; subindex++){
+                    float sum_val = 0;
+                    for (int subindex_ = 0; subindex_ < embeddingSize; subindex_++){
+                        sum_val += normalized_vectors[index][subindex_] * grow_weights[subindex_ * (embeddingSize * 4) * 3 + subindex * 3];
+                    }
+                    bigger_vectors[index][subindex] = sum_val + grow_biases[subindex * 3];
+                }
+            }
+        }
+    }
+
+    char* saveornot = NULL;
+    while (true){
+        saveornot = input("Do you want to save the current model? (y/n) ");
+        if (strcmp(saveornot, "y") == 0){
+            save("bruh.zip");
+            free(saveornot);
+            break;
+        }
+        else{
+            if (strcmp(saveornot, "n") == 0){
+                printf("alr\n");
+                free(saveornot);
+                break;
+            }
+            else{
+                printf("Enter y for yes or n for no.\n");
+                free(saveornot);
+            }
+        }
+    }
 
     printf("Enter strings to tokenize:\n");
     while (true){
         char* in = input("› ");
         int* tokens = tokenize(in);
+        free(in);
         
         printf("Token ids: ");
         for (int index = 1; index < tokens[0] + 1; index++){
