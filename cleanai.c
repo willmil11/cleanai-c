@@ -3830,6 +3830,44 @@ int main(int argc, char** argv){
                     bigger_vectors[index][subindex] = sum_val + grow_biases[subindex * 3];
                 }
             }
+
+            if (return_cache){
+                rets.cache.layers[layer].feed_forward.bigger = bigger_vectors;
+            }
+
+            float** after_relu_vectors = NULL;
+            if (return_cache){
+                after_relu_vectors = malloc(tokenized[0] * sizeof(float*));
+                if (!after_relu_vectors){
+                    failed_alloc("Failed to allocate memory to compute relu on ffw grow.");
+                }
+            }
+            else{
+                after_relu_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute relu on ffw grow.");
+            }
+
+            if (return_cache){
+                for (int index = 0; index < tokenized[0]; index++){
+                    after_relu_vectors[index] = calloc(embeddingSize * 4 * sizeof(float), 1);
+                    if (!after_relu_vectors[index]){
+                        failed_alloc("Failed to allocate memory to compute relu on ffw grow.");
+                    }
+                }
+            }
+            else{
+                for (int index = 0; index < tokenized[0]; index++){
+                    after_relu_vectors[index] = track(calloc(embeddingSize * 4 * sizeof(float), 1), "Failed toa llocate memory to compute relu on ffw grow.");
+                }
+            }
+
+            memcpy(after_relu_vectors, bigger_vectors, tokenized[0] * sizeof(float*));
+
+            for (int index = 0; index < tokenized[0]; index++){
+                memcpy(after_relu_vectors[index], bigger_vectors[index], embeddingSize * 4 * sizeof(float));
+                for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    
+                }
+            }
         }
     }
 
