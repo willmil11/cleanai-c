@@ -3190,11 +3190,13 @@ int main(int argc, char** argv){
             return 0;
         }
 
-        float* predicted_probs = softmax(vec, vec_len);
+        float* predicted_probs = calloc(vec_len * sizeof(float), 1);
         if (!predicted_probs){
             printf("Failed to allocate memory to calculate loss.\n");
             exit(1);
         }
+        predicted_probs = softmax(vec, vec_len, predicted_probs);
+        
         float epsilon = antiOverfittingOptimisations ? 0.1f : 0;
 
         float loss = 0;
@@ -3228,11 +3230,12 @@ int main(int argc, char** argv){
     } layer_cache_entry;
 
     typedef struct {
-        int* token_ids;
+        int predicted_token_id;
         struct {
             int* tokenized;
             float** initial_embeddings;
             float** positional_encodings;
+            float* vocab_scores;
             layer_cache_entry* layers;
         } cache;
         bool success;
@@ -3272,6 +3275,12 @@ int main(int argc, char** argv){
             return -1;
         }
 
+        //Failed alloc procedure.
+        void failed_alloc(char* failed_task){
+            printf("%s.\n", failed_task);
+            exit(1); //let os reclaim memory lol
+        }
+
         void* track(void* ptr, char* failed_task){
             if (!ptr){
                 //Failed alloc = no memory = can't do anything anyways = should exit.
@@ -3308,7 +3317,7 @@ int main(int argc, char** argv){
             }
 
             tracked_len--;
-            void** new = malloc(tracked_len * sizeof(void**));
+            void** new = malloc(tracked_len * sizeof(void*));
             if (!new){
                 tracked_len++;
                 return false;
@@ -3333,16 +3342,12 @@ int main(int argc, char** argv){
             return true;
         }
 
-        //Failed alloc procedure.
-        void failed_alloc(char* failed_task){
-            printf("%s.\n", failed_task);
-            exit(1); //let os reclaim memory lol
-        }
-
         printf("Doing inference...\n");
         long long timer_ = timer();
         
         infret rets = {0}; //zero every field
+        
+        rets.success = true; //failure will set it to false, its a sucess otherwise.
 
         long long subtimer = timer();
         printf("Tokenizing input context...\n");
@@ -3370,6 +3375,9 @@ int main(int argc, char** argv){
         }
         else{
             positional_encodings = track(calculate_positional_encoding(tokenized[0]), "Failed to compute positional encodings.");
+            for (int index = 0; index < tokenized[0]; index++){
+                track(positional_encodings[index], "");
+            }
         }
         printf("Computed positional encodings in %lldms.\n", timer_end(subtimer));
 
@@ -3383,19 +3391,40 @@ int main(int argc, char** argv){
             }
         }
 
-        float** final_embeddings = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute final embeddings.");
+        float** final_embeddings = NULL;
+        if (return_cache){
+            final_embeddings = malloc(tokenized[0] * sizeof(float*));
+            if (!final_embeddings){
+                failed_alloc("Failed to allocate memory to compute final embeddings.");
+            }
+        }
+        else{
+            final_embeddings = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute final embeddings.");
+        }
 
         for (int index = 1; index < tokenized[0] + 1; index++){
             char* token = id_to_token(tokenized[index]);
             int token_id = tokenized[index];
             float* embedding = get_embedding(token_id);
-            float* final_embedding = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to process embeddings.");
-            float* initial_embedding;
+            float* final_embedding = NULL;
+            if (return_cache){
+                final_embedding = calloc(embeddingSize * sizeof(float), 1);
+                if (!final_embedding){
+                    failed_alloc("Failed to allocate memory to process embeddings.");
+                }
+            }
+            else{
+                final_embedding = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to process embeddings.");
+            }
+            float* initial_embedding = NULL;
             if (return_cache){
                 initial_embedding = calloc(embeddingSize * sizeof(float), 1);
                 if (!initial_embedding){
                     failed_alloc("Failed to allocate memory to process embeddings.");
                 }
+            }
+            else{
+                initial_embedding = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to process embeddings.");
             }
 
             for (int subindex = 0; subindex < embeddingSize; subindex++){
@@ -3431,7 +3460,16 @@ int main(int argc, char** argv){
             long long layertimer = timer();
             printf("Computing layer %d/%d...\n", layer, layersAmount);
             
-            float** normalized_embeddings = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute normalized embeddings.");
+            float** normalized_embeddings = NULL;
+            if (!return_cache){
+                normalized_embeddings = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute normalized embeddings.");
+            }
+            else{
+                normalized_embeddings = malloc(tokenized[0] * sizeof(float*));
+                if (!normalized_embeddings){
+                    failed_alloc("Failed to allocate memory to compute normalized embeddings.");
+                }
+            }
 
             float* norm1_weights = layers[layer].weights.normalize_1;
             float* norm1_biases = layers[layer].biases.normalize_1;
@@ -3454,45 +3492,35 @@ int main(int argc, char** argv){
                     rets.cache.layers[layer].norm1_x_hat[index] = x_hat_for_cache_1;
                 }
 
-                float* final_norm_1_output = normalize_vector(final_embeddings[index], embeddingSize, norm1_weights, norm1_biases);
-
-                if (!final_norm_1_output){
-                    failed_alloc("Failed to compute x hat for cache 1.");
+                float* final_norm_1_output = NULL;
+                if (!return_cache){
+                    final_norm_1_output = track(normalize_vector(final_embeddings[index], embeddingSize, norm1_weights, norm1_biases), "Failed to compute x hat for cache 1.");
+                }
+                else{
+                    final_norm_1_output = normalize_vector(final_embeddings[index], embeddingSize, norm1_weights, norm1_biases);
+                    if (!final_norm_1_output){
+                        failed_alloc("Failed to compute x hat for cache 1.");
+                    }
                 }
 
                 normalized_embeddings[index] = final_norm_1_output;
             }
 
-            //TODO:Free normalized_embeddings at the end only if return_cache is false
             if (return_cache){
                 rets.cache.layers[layer].normalized = normalized_embeddings;
             }
 
             float*** head_outputs = track(malloc(heads * sizeof(float**)), "Failed to allocate memory to store head outputs."); //too many pointers i swear
-
-            for (int index = 0; index < heads; index++){
-                if (return_cache){
-                    head_outputs[index] = malloc(tokenized[0] * sizeof(float*));
-                    if (!head_outputs[index]){
-                        failed_alloc("Failed to allocate memory to store head outputs.");
-                    }
-                }
-                else{
-                    head_outputs[index] = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store head outputs.");
-                }
-                for (int subindex = 0; subindex < tokenized[0]; subindex++){
-                    if (return_cache){
-                        head_outputs[index][subindex] = calloc(embeddingSize * sizeof(float), 1);
-                        if (!head_outputs[index][subindex]){
-                            failed_alloc("Failed to allocate memory to store head outputs.");
-                        }
-                    }
-                    else{
-                        head_outputs[index][subindex] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to store head outputs.");
+            
+            if (return_cache) {
+                if (!rets.cache.layers[layer].heads) {
+                    rets.cache.layers[layer].heads = calloc(heads * sizeof(*rets.cache.layers[layer].heads), 1);
+                    if (!rets.cache.layers[layer].heads){
+                        failed_alloc("Failed to allocate memory to store head cache.");
                     }
                 }
             }
-            
+
             for (int head = 0; head < heads; head++){
                 float** q_vectors = NULL;
                 float** k_vectors = NULL;
@@ -3669,13 +3697,15 @@ int main(int argc, char** argv){
                     }
                 }
 
+                head_outputs[head] = post_attention_vectors;
+
                 if (return_cache){
-                    rets.cache.layers[index].heads[head].q_vectors = q_vectors;
-                    rets.cache.layers[index].heads[head].k_vectors = k_vectors;
-                    rets.cache.layers[index].heads[head].v_vectors = v_vectors;
-                    rets.cache.layers[index].heads[head].attention_scores = attention_scores;
-                    rets.cache.layers[index].heads[head].attention_probs = attention_probs;
-                    rets.cache.layers[index].heads[head].output = post_attention_vectors;
+                    rets.cache.layers[layer].heads[head].q_vectors = q_vectors;
+                    rets.cache.layers[layer].heads[head].k_vectors = k_vectors;
+                    rets.cache.layers[layer].heads[head].v_vectors = v_vectors;
+                    rets.cache.layers[layer].heads[head].attention_scores = attention_scores;
+                    rets.cache.layers[layer].heads[head].attention_probs = attention_probs;
+                    rets.cache.layers[layer].heads[head].output = post_attention_vectors;
                 }
             }
 
@@ -3785,11 +3815,7 @@ int main(int argc, char** argv){
                     rets.cache.layers[layer].norm2_x_hat[index] = norm2_x_hat;
                 }
 
-                float* final_norm2 = normalize_vector(combined_vectors[index], embeddingSize, norm2_weights, norm2_biases);
-                if (!final_norm2){
-                    printf("Failed to compute norm 2.\n");
-                    exit(1);
-                }
+                float* final_norm2 = track(normalize_vector(combined_vectors[index], embeddingSize, norm2_weights, norm2_biases), "Failed to compute norm 2.");
 
                 normalized_vectors[index] = final_norm2;
             }
@@ -3856,59 +3882,213 @@ int main(int argc, char** argv){
             }
             else{
                 for (int index = 0; index < tokenized[0]; index++){
-                    after_relu_vectors[index] = track(calloc(embeddingSize * 4 * sizeof(float), 1), "Failed toa llocate memory to compute relu on ffw grow.");
+                    after_relu_vectors[index] = track(calloc(embeddingSize * 4 * sizeof(float), 1), "Failed to allocate memory to compute relu on ffw grow.");
                 }
             }
-
-            memcpy(after_relu_vectors, bigger_vectors, tokenized[0] * sizeof(float*));
 
             for (int index = 0; index < tokenized[0]; index++){
                 memcpy(after_relu_vectors[index], bigger_vectors[index], embeddingSize * 4 * sizeof(float));
-                for (int subindex = 0; subindex < embeddingSize; subindex++){
-                    
+                for (int subindex = 0; subindex < embeddingSize * 4; subindex++){
+                    if (after_relu_vectors[index][subindex] < 0){
+                        after_relu_vectors[index][subindex] = 0;
+                    }
                 }
             }
-        }
-    }
 
-    char* saveornot = NULL;
-    while (true){
-        saveornot = input("Do you want to save the current model? (y/n) ");
-        if (strcmp(saveornot, "y") == 0){
-            save("bruh.zip");
-            free(saveornot);
-            break;
-        }
-        else{
-            if (strcmp(saveornot, "n") == 0){
-                printf("alr\n");
-                free(saveornot);
-                break;
+            if (return_cache){
+                rets.cache.layers[layer].feed_forward.after_relu = after_relu_vectors;
+            }
+
+            float** final_big_vectors = NULL;
+            if (return_cache){
+                float dropout_rate = 0;
+                if (antiOverfittingOptimisations){
+                    dropout_rate = 0.1;
+                }
+                if (dropout_rate > 0){
+                    final_big_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute dropout on ffw grow.");
+
+                    for (int index = 0; index < tokenized[0]; index++){
+                        final_big_vectors[index] = track(calloc(embeddingSize * 4 * sizeof(float), 1), "Failed to allocate memory to compute dropout on ffw grow.");
+                    }
+
+                    for (int index = 0; index < tokenized[0]; index++){
+                        memcpy(final_big_vectors[index], after_relu_vectors[index], embeddingSize * 4 * sizeof(float));
+                        for (int subindex = 0; subindex < embeddingSize * 4; subindex++){
+                            float range[] = {0, 0.99999994f};
+                            float random_n = random_range(range);
+                            if (random_n < dropout_rate){
+                                final_big_vectors[index][subindex] = 0;
+                            }
+                            else{
+                                final_big_vectors[index][subindex] /= (1 - dropout_rate);
+                            }
+                        }
+                    }
+                }
+                else{
+                    final_big_vectors = after_relu_vectors;
+                }
             }
             else{
-                printf("Enter y for yes or n for no.\n");
-                free(saveornot);
+                final_big_vectors = after_relu_vectors;
+            }
+
+            float** final_vectors = NULL;
+            if (return_cache){
+                final_vectors = malloc(tokenized[0] * sizeof(float*));
+                if (!final_vectors){
+                    failed_alloc("Failed to allocate memory to compute ffw shrink.");
+                }
+            }
+            else{
+                final_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute ffw shrink.");
+            }
+
+            if (return_cache){
+                for (int index = 0; index < tokenized[0]; index++){
+                    final_vectors[index] = calloc(embeddingSize * sizeof(float), 1);
+                    if (!final_vectors[index]){
+                        failed_alloc("Failed to allocate memory to compute ffw shrink.");
+                    }
+                }
+            }
+            else{
+                for (int index = 0; index < tokenized[0]; index++){
+                    final_vectors[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to compute ffw shrink.");
+                }
+            }
+
+            float* shrink_weights = layers[layer].weights.feed_forward.shrink;
+            float* shrink_biases = layers[layer].biases.feed_forward.shrink;
+
+            for (int index = 0; index < tokenized[0]; index++){
+                for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    float accum = 0;
+                    for (int subindex_ = 0; subindex_ < embeddingSize * 4; subindex_++){
+                        accum += final_big_vectors[index][subindex_] * shrink_weights[subindex * (embeddingSize * 4) * 3 + subindex_ * 3];
+                    }
+                    final_vectors[index][subindex] = accum + shrink_biases[subindex * 3];
+                }
+            }
+
+            for (int index = 0; index < tokenized[0]; index++){
+                float* residual = combined_vectors[index];
+                for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    final_vectors[index][subindex] += residual[subindex];
+                }
+            }
+
+            if (return_cache){
+                rets.cache.layers[layer].feed_forward.final = final_vectors;
+            }
+            
+            final_embeddings = final_vectors; //Output of this layer becomes input for the next
+            printf("Computed layer %d/%d in %lldms.\n", layer + 1, layersAmount, timer_end(layertimer));
+        }
+        printf("Computed all (%d) layers in %lldms.\n", layersAmount, timer_end(layerstimer));
+        long long timer_token = timer();
+        printf("Computing next token...\n");
+        float* last_token_embedding = final_embeddings[tokenized[0] - 1];
+        float* scores = NULL;
+        if (return_cache){
+            scores = calloc(vocab_len * sizeof(float), 1);
+            if (!scores){
+                failed_alloc("Failed to allocate memory to compute next token.");
             }
         }
+        else{
+            scores = track(calloc(vocab_len * sizeof(float), 1), "Failed to allocate memory to compute next token.");
+        }
+
+        float* vocab_weights = vocab_projection.weights;
+        float* vocab_biases = vocab_projection.biases;
+
+        for (int index = 0; index < vocab_len; index++){
+            float score = 0;
+            for (int subindex = 0; subindex < embeddingSize; subindex++){
+                score += last_token_embedding[subindex] * vocab_weights[index * embeddingSize * 3 + subindex * 3];
+            }
+            score += vocab_biases[index * 3];
+            scores[index] = score;
+        }
+
+        if (return_cache){
+            rets.cache.vocab_scores = scores;
+        }
+
+        float highest_score = -FLT_MAX;
+        int next_token_index = 0;
+        for (int index = 0; index < vocab_len; index++){
+            float score = scores[index];
+            if (score > highest_score){
+                highest_score = score;
+                next_token_index = index;
+            }
+        }
+
+        rets.predicted_token_id = next_token_index;
+
+        printf("Computed next token in %lldms.\n", timer_end(timer_token));
+        cleanup();
+        printf("Did inference in %lldms.\n", timer_end(timer_));
+        return rets;
     }
 
-    printf("Enter strings to tokenize:\n");
+    printf("Input strings to run inference on:\n");
     while (true){
-        char* in = input("› ");
-        int* tokens = tokenize(in);
-        free(in);
-        
-        printf("Token ids: ");
-        for (int index = 1; index < tokens[0] + 1; index++){
-            printf("%d ", tokens[index]);
+        char* input_to_inference = input("› ");
+        if (strcmp(input_to_inference, "exit") == 0){
+            return 0;
         }
-        printf("\n");
-        printf("Tokens: ");
-        for (int index = 1; index < tokens[0] + 1; index++){
-            printf("\"%s\" ", id_to_token(tokens[index]));
-        }
-        printf("\n");
+        infret rets = inference(input_to_inference, false);
+        int predicted_token_id = rets.predicted_token_id;
+        char* predicted_token = id_to_token(predicted_token_id);
+        printf("Predicted token id %d: %s\n", predicted_token_id, predicted_token);
+        free(input_to_inference);
     }
+
+    //NOTE: Old demos
+    //
+    // char* saveornot = NULL;
+    // while (true){
+    //     saveornot = input("Do you want to save the current model? (y/n) ");
+    //     if (strcmp(saveornot, "y") == 0){
+    //         save("bruh.zip");
+    //         free(saveornot);
+    //         break;
+    //     }
+    //     else{
+    //         if (strcmp(saveornot, "n") == 0){
+    //             printf("alr\n");
+    //             free(saveornot);
+    //             break;
+    //         }
+    //         else{
+    //             printf("Enter y for yes or n for no.\n");
+    //             free(saveornot);
+    //         }
+    //     }
+    // }
+    //
+    // printf("Enter strings to tokenize:\n");
+    // while (true){
+    //     char* in = input("› ");
+    //     int* tokens = tokenize(in);
+    //     free(in);
+    //
+    //     printf("Token ids: ");
+    //     for (int index = 1; index < tokens[0] + 1; index++){
+    //         printf("%d ", tokens[index]);
+    //     }
+    //     printf("\n");
+    //     printf("Tokens: ");
+    //     for (int index = 1; index < tokens[0] + 1; index++){
+    //         printf("\"%s\" ", id_to_token(tokens[index]));
+    //     }
+    //     printf("\n");
+    // }
+    //
 
     return 0;
 }
