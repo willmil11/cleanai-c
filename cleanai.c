@@ -4036,6 +4036,7 @@ int main(int argc, char** argv){
     }
 
     printf("Input strings to run inference on:\n");
+    printf("(Type 'exit' to exit)\n");
     while (true){
         char* input_to_inference = input("› ");
         if (strcmp(input_to_inference, "exit") == 0){
