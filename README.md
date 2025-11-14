@@ -26,7 +26,7 @@ And normally the script will display an easy to understand help message, the scr
 <br>
 <strong>Manual way</strong>
 <br>
-You can already compile the code with
+You can compile the code manually with
 ```bash
 gcc -O3 -march=native -ffast-math cleanai.c -o cleanai -lm
 ```
