@@ -22,8 +22,6 @@ fish compile.fish help
 And normally the script will display an easy to understand help message, the script is actually super super simple to use so just run the help command like I showed you and you'll understand pretty much imediately.
 <br>
 <i>Note: script requires gcc and fish shell, obviously.</i>
-```
-```
 <strong>Manual way</strong>
 <br>
 You can already compile the code with
