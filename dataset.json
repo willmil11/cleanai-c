@@ -1,42 +1,32 @@
 [
     {
+        "system_prompt": ""
         "inputs": ["Hey!"],
         "outputs": ["Hey, how are you?"]
     },
     {
+        "system_prompt": ""
         "inputs": ["Hey there!"],
         "outputs": ["Hey there, how are you?"]
     },
     {
+        "system_prompt": ""
         "inputs": ["Hey man!"],
         "outputs": ["Hey man, how are you?"]
     },
     {
+        "system_prompt": ""
         "inputs": ["Hey friend!"],
         "outputs": ["Hey friend, how are you?"]
     },
     {
+        "system_prompt": ""
         "inputs": ["Hey stranger!"],
         "outputs": ["Hey stranger, how are you?"]
     },
     {
-        "inputs": ["Hey!"],
-        "outputs": ["Hey, how are you?"]
-    },
-    {
-        "inputs": ["Hey there!"],
-        "outputs": ["Hey there, how are you?"]
-    },
-    {
-        "inputs": ["Hey!"],
-        "outputs": ["Hey, how are you?"]
-    },
-    {
+        "system_prompt": ""
         "inputs": ["Hey you!"],
         "outputs": ["Hey you, how are you?"]
-    },
-    {
-        "inputs": ["Hey!"],
-        "outputs": ["Hey, how are you?"]
     }
 ]

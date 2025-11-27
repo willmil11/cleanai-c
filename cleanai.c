@@ -276,7 +276,7 @@ char* read_file(const char* path) {
 }
 
 int main(int argc, char** argv){
-    int* ids = malloc(1); //1 byte init alloc
+    int* ids = malloc(sizeof(int)); //initial dummy slot
 
     if (!ids){
         printf("Failed memory allocation for ids, ids will not be tracked therefore ids may not be strictly unique.\n");
@@ -359,7 +359,7 @@ int main(int argc, char** argv){
         return 0;
     }
 
-    long long** timers = malloc(1); //1 byte init alloc
+    long long** timers = malloc(sizeof(long long*)); //initial dummy slot
     
     if (!timers){
         printf("Failed memory allocation for timers, timers will not be available.\n");
@@ -478,6 +478,9 @@ int main(int argc, char** argv){
     bool new = false;
     bool load = false;
     bool debug = false;
+    int head_dim = -1;
+    int embeddingSize = -1;
+    int heads = -1;
 
     char* valid_flags[] = {"--new", "--load", "--config", "--train", "--pretrain", "--debug", NULL};
     int valid_flags_len = 0;
@@ -659,9 +662,18 @@ int main(int argc, char** argv){
         }
     }
 
-    if (!file_exists(config_location)){
-        printf("Failed to open config file. Most likely causes are that it doesn't exist or that you don't have the required permissions to read it.\n");
-        return 1;
+    if (!(load && (!do_train) && (!do_pretrain))){
+        if (!file_exists(config_location)){
+            printf("Failed to open config file. Most likely causes are that it doesn't exist or that you don't have the required permissions to read it.\n");
+            return 1;
+        }
+    }
+    else{
+        if (config_location){
+            if (!(strcmp(config_location, "") == 0)){
+                printf("[Config] [Info] Ignoring config because you are loading a model and not (pre-)training therefore a config is not required.\n");
+            }
+        }
     }
 
     if (load){
@@ -672,6 +684,41 @@ int main(int argc, char** argv){
     }
 
     printf("Arguments parsed successfully :)\n");
+
+    int contextSize = -1;
+    int maxOutputSize = -1;
+    if (load && (!do_pretrain) && (!do_train)){
+        printf("Since you are loading a model and not (pre-)training it, a config is optional and you did not provide one, a context size and max output size are required to use the model.\n");
+        while (contextSize < 1){
+            char* contextSizeInput = input("Please enter context size for the model (>1): ");
+            if (!contextSizeInput){
+                printf("Failed to read user input.\n");
+                return 1;
+            }
+            contextSize = atoi(contextSizeInput);
+            free(contextSizeInput);
+
+            if (contextSize < 1){
+                printf("Invalid input, should be integer greater than 1.\n");
+                continue;
+            }
+        }
+        while (maxOutputSize < 1){
+            char* maxOutputSizeInput = input("Please enter max output size for the model (>1): ");
+            if (!maxOutputSizeInput){
+                printf("Failed to read user input.\n");
+                return 1;
+            }
+            maxOutputSize = atoi(maxOutputSizeInput);
+            free(maxOutputSizeInput);
+
+            if (maxOutputSize < 1){
+                printf("Invalid input, should be integer greater than 1.\n");
+                continue;
+            }
+        }
+        goto after_config_parse;
+    }
 
     printf("Reading config file...\n");
     char* config_file = read_file(config_location);
@@ -702,6 +749,7 @@ int main(int argc, char** argv){
 
     cJSON* pre_training_paths_raw = cJSON_GetObjectItem(config, "pre-training-paths");
     char** pre_training_paths = NULL;
+    int pre_training_paths_len = -1;
     if (!cJSON_IsArray(pre_training_paths_raw)){
         if (!do_pretrain){
             printf("[Config] [Warning] pre-training-paths is missing/corrupted but --pretrain is not specified therefore this can be ignored.\n");
@@ -716,7 +764,7 @@ int main(int argc, char** argv){
             printf("[Config] [Info] Ignoring pre-training-paths as you did not specify --pretrain.\n");
         }
         else{
-            int pre_training_paths_len = cJSON_GetArraySize(pre_training_paths_raw);
+            pre_training_paths_len = cJSON_GetArraySize(pre_training_paths_raw);
             if (pre_training_paths_len == 0){
                 printf("[Config] [Fatal] pre-training-paths is empty.\n");
                 return 1;
@@ -750,37 +798,59 @@ int main(int argc, char** argv){
         }
     }
 
-    cJSON* training_dataset_path_raw = cJSON_GetObjectItem(config, "training-dataset-path");
-    char* training_dataset_path = NULL;
-    if (!cJSON_IsString(training_dataset_path_raw)){
+    cJSON* training_dataset_paths_raw = cJSON_GetObjectItem(config, "training-dataset-paths");
+    char** training_dataset_paths = NULL;
+    int training_dataset_paths_len = -1;
+    if (!cJSON_IsArray(training_dataset_paths_raw)){
         if (!do_train){
-            printf("[Config] [Warning] training-dataset-path is missing/corrupted but --train is not specified therefore this can be ignored.\n");
+            printf("[Config] [Warning] training-dataset-paths is missing/corrupted but --train is not specified therefore this can be ignored.\n");
         }
         else{
-            printf("[Config] [Fatal] training-dataset-path is missing/corrupted.\n");
+            printf("[Config] [Fatal] training-dataset-paths is missing/corrupted.\n");
             return 1;
         }
     }
     else{
         if (!do_train){
-            printf("[Config] [Info] Ignoring training-dataset-path as you did not specify --train.\n");
+            printf("[Config] [Info] Ignoring training-dataset-paths as you did not specify --train.\n");
         }
         else{
-            if (strlen(training_dataset_path_raw->valuestring) == 0){
-                printf("[Config] [Fatal] training-dataset-path is not a valid file path.\n");
+            training_dataset_paths_len = cJSON_GetArraySize(training_dataset_paths_raw);
+            if (training_dataset_paths_len == 0){
+                printf("[Config] [Fatal] training-dataset-paths is empty.\n");
                 return 1;
             }
-            if (!file_exists(training_dataset_path_raw->valuestring)){
-                printf("[Config] [Fatal] training-dataset-path is not a valid file path.\n");
+
+            training_dataset_paths = malloc(training_dataset_paths_len * sizeof(char*));
+            if (!training_dataset_paths){
+                printf("Failed to allocate memory to parse config.\n");
                 return 1;
             }
-            else{
-                training_dataset_path = malloc(strlen(training_dataset_path_raw->valuestring) + 1);
-                if (!training_dataset_path){
+
+            for (int index = 0; index < training_dataset_paths_len; index++){
+                cJSON* item = cJSON_GetArrayItem(training_dataset_paths_raw, index);
+                if (!cJSON_IsString(item)){
+                    printf("[Config] [Fatal] Item %d/%d of training-dataset-paths is not a string.\n", index + 1, training_dataset_paths_len);
+                    return 1;
+                }
+
+                training_dataset_paths[index] = malloc(strlen(item->valuestring) + 1);
+                if (!training_dataset_paths[index]){
                     printf("Failed to allocate memory to parse config.\n");
                     return 1;
                 }
-                strcpy(training_dataset_path, training_dataset_path_raw->valuestring);
+
+                strcpy(training_dataset_paths[index], item->valuestring);
+
+                if (strlen(training_dataset_paths[index]) == 0){
+                    printf("[Config] [Fatal] Item %d/%d of training-dataset-paths isn't a valid file path.\n", index + 1, training_dataset_paths_len);
+                    return 1;
+                }
+
+                if (!file_exists(training_dataset_paths[index])){
+                    printf("[Config] [Fatal] Item %d/%d of training-dataset-paths isn't a valid file path.\n", index + 1, training_dataset_paths_len);
+                    return 1;
+                }
             }
         }
     }
@@ -869,6 +939,32 @@ int main(int argc, char** argv){
         }
     }
 
+    cJSON* ffn_grow_size_raw = cJSON_GetObjectItem(config, "ffnGrowSize");
+    int ffn_grow_size = -1;
+
+    if (!cJSON_IsNumber(ffn_grow_size_raw)){
+        printf("[Config] [Fatal] ffnGrowSize is missing/corrupted.\n");
+        return 1;
+    }
+    else{
+        if (!(isInt(ffn_grow_size_raw->valuedouble))){
+            printf("[Config] [Fatal] ffnGrowSize is supposed to be an int but it is a float.\n");
+            return 1;
+        }
+        else{
+            if ((int)(ffn_grow_size_raw->valuedouble) < 1){
+                printf("[Config] [Fatal] ffnGrowSize is supposed to be >= 1, but it is set to %d.\n",
+                    (int)(ffn_grow_size_raw->valuedouble));
+                return 1;
+            }
+            else{
+                ffn_grow_size = (int)(ffn_grow_size_raw->valuedouble);
+            }
+        }
+    }
+
+    int ffnGrowSize = ffn_grow_size;
+
     cJSON* pre_train_optimizer_raw = cJSON_GetObjectItem(config, "pre-train-optimizer");
     char* pre_train_optimizer = NULL;
 
@@ -946,7 +1042,6 @@ int main(int argc, char** argv){
     }
 
     cJSON* contextSize_raw = cJSON_GetObjectItem(config, "contextSize");
-    int contextSize = -1;
 
     if (!cJSON_IsNumber(contextSize_raw)){
         printf("[Config] [Fatal] contextSize is missing/corrupted.\n");
@@ -993,7 +1088,6 @@ int main(int argc, char** argv){
     }
 
     cJSON* maxOutputSize_raw = cJSON_GetObjectItem(config, "maxOutputSize");
-    int maxOutputSize = -1;
 
     if (!cJSON_IsNumber(maxOutputSize_raw)){
         printf("[Config] [Fatal] maxOutputSize is missing/corrupted.\n");
@@ -1080,7 +1174,6 @@ int main(int argc, char** argv){
     }
 
     cJSON* embeddingSize_raw = cJSON_GetObjectItem(config, "embeddingSize");
-    int embeddingSize = -1;
     if (!cJSON_IsNumber(embeddingSize_raw)){
         if (new){
             printf("[Config] [Fatal] embeddingSize is missing/corrutped.\n");
@@ -1164,7 +1257,6 @@ int main(int argc, char** argv){
     }
 
     cJSON* heads_raw = cJSON_GetObjectItem(config, "heads");
-    int heads = -1;
     if (!cJSON_IsNumber(heads_raw)){
         if (new){
             printf("[Config] [Fatal] heads is missing/corrutped.\n");
@@ -1197,6 +1289,11 @@ int main(int argc, char** argv){
             else{
                 if (new){
                     heads = (int)(heads_raw->valuedouble);
+                    if (embeddingSize % heads != 0){
+                        printf("[Config] [Fatal] embeddingSize must be divisible by heads. Got embeddingSize=%d and heads=%d.\n", embeddingSize, heads);
+                        return 1;
+                    }
+                    head_dim = embeddingSize / heads;
                 }
                 else{
                     printf("[Config] [Info] Ignoring heads as you are loading a model, not creating a new one.\n");
@@ -1331,6 +1428,7 @@ int main(int argc, char** argv){
 
     cJSON_Delete(config);
 
+after_config_parse:
     float* he_init(float fan_in){
         float* returns = malloc(2 * sizeof(float));
         if (!returns){
@@ -1483,26 +1581,43 @@ int main(int argc, char** argv){
         }
     }
 
-    int* tokenize(char* str_) {
-        int len = strlen(str_);
-        if (len == 0) return NULL;
+    typedef struct {
+        size_t seq_len;
+        int* tokens;
+        bool success;
+    } tokenize_ret;
+
+    tokenize_ret tokenize(char* str_) {
+        tokenize_ret out = {0};
+
+        out.success = true;
+        out.seq_len = 0;
+        out.tokens = NULL;
+
+        size_t len = strlen(str_);
+        if (len == 0) {
+            return out;
+        }
 
         char* str = malloc(len + 1);
         if (!str) {
             printf("Failed to allocate memory to tokenize text.\n");
-            return NULL;
+            out.success = false;
+            return out;
         }
         strcpy(str, str_);
 
-        int* tokenized = NULL;
-        int tokenized_len = 0;
-        int consumed = 0;
+        int* tokenized = NULL;       // dynamic array of int tokens
+        size_t tokenized_len = 0;    // number of tokens we have
+        size_t consumed = 0;
 
         while (consumed < len) {
-            int cursor = len - consumed;
+
+            size_t cursor = len - consumed;
             int found = 0;
 
             while (cursor > 0) {
+
                 char saved = str[consumed + cursor];
                 str[consumed + cursor] = '\0';
 
@@ -1511,37 +1626,44 @@ int main(int argc, char** argv){
                 str[consumed + cursor] = saved;
 
                 if (tok_id != -1) {
-                    int* new_arr = realloc(tokenized, (tokenized_len + 2) * sizeof(int));
+
+                    int* new_arr = realloc(tokenized, (tokenized_len + 1) * sizeof(int));
                     if (!new_arr) {
                         printf("Failed to allocate memory to tokenize text.\n");
                         free(tokenized);
                         free(str);
-                        return NULL;
+                        out.seq_len = 0;
+                        out.tokens = NULL;
+                        return out;
                     }
+
                     tokenized = new_arr;
-                    tokenized_len++;
                     tokenized[tokenized_len] = tok_id;
+                    tokenized_len++;
+
                     consumed += cursor;
                     found = 1;
                     break;
                 }
+
                 cursor--;
             }
 
             if (!found) {
                 free(tokenized);
                 free(str);
-                return NULL;
+                out.seq_len = 0;
+                out.tokens = NULL;
+                return out;
             }
         }
 
         free(str);
 
-        if (tokenized) {
-            tokenized[0] = tokenized_len;
-        }
+        out.seq_len = tokenized_len;
+        out.tokens = tokenized;
 
-        return tokenized;
+        return out;
     }
 
     float temperature = 0.7;
@@ -1642,13 +1764,13 @@ int main(int argc, char** argv){
             layers[index].biases.normalize_2 = calloc(embeddingSize * 3 * sizeof(float), 1);
             layers[index].weights.attention.heads = malloc(heads * sizeof(*layers[index].weights.attention.heads));
             layers[index].biases.attention.heads = malloc(heads * sizeof(*layers[index].biases.attention.heads));
-            layers[index].weights.attention.output = calloc(embeddingSize * (embeddingSize * heads) * 3 * sizeof(float), 1);
+            layers[index].weights.attention.output = calloc(embeddingSize * (head_dim * heads) * 3 * sizeof(float), 1);
             layers[index].biases.attention.output = calloc(embeddingSize * 3 * sizeof(float), 1);
-            layers[index].weights.feed_forward.grow = calloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), 1);
-            layers[index].weights.feed_forward.gate = calloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), 1);
-            layers[index].weights.feed_forward.shrink = calloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), 1);
-            layers[index].biases.feed_forward.grow = calloc((embeddingSize * 4) * 3 * sizeof(float), 1);
-            layers[index].biases.feed_forward.gate = calloc((embeddingSize * 4) * 3 * sizeof(float), 1);
+            layers[index].weights.feed_forward.grow = calloc(embeddingSize * (embeddingSize * ffnGrowSize) * 3 * sizeof(float), 1);
+            layers[index].weights.feed_forward.gate = calloc(embeddingSize * (embeddingSize * ffnGrowSize) * 3 * sizeof(float), 1);
+            layers[index].weights.feed_forward.shrink = calloc(embeddingSize * (embeddingSize * ffnGrowSize) * 3 * sizeof(float), 1);
+            layers[index].biases.feed_forward.grow = calloc((embeddingSize * ffnGrowSize) * 3 * sizeof(float), 1);
+            layers[index].biases.feed_forward.gate = calloc((embeddingSize * ffnGrowSize) * 3 * sizeof(float), 1);
             layers[index].biases.feed_forward.shrink = calloc(embeddingSize * 3 * sizeof(float), 1);
 
             if (!layers[index].weights.normalize_1){
@@ -1709,20 +1831,20 @@ int main(int argc, char** argv){
             }
 
             for (int subindex = 0; subindex < embeddingSize; subindex++){
-                layers[index].weights.normalize_1[subindex * 3] = random_range(weightsinitrange);
-                layers[index].weights.normalize_2[subindex * 3] = random_range(weightsinitrange);
-                layers[index].biases.normalize_1[subindex * 3] = random_range(biasesinitrange);
-                layers[index].biases.normalize_2[subindex * 3] = random_range(biasesinitrange);
+                layers[index].weights.normalize_1[subindex * 3] = 1.0f; // RMSNorm gamma
+                layers[index].weights.normalize_2[subindex * 3] = 1.0f; // RMSNorm gamma
+                layers[index].biases.normalize_1[subindex * 3] = 0.0f;  // beta
+                layers[index].biases.normalize_2[subindex * 3] = 0.0f;  // beta
             }
 
             for (int subindex = 0; subindex < heads; subindex++){
-                layers[index].weights.attention.heads[subindex].query = calloc(embeddingSize * embeddingSize * 3 * sizeof(float), 1);
-                layers[index].weights.attention.heads[subindex].key = calloc(embeddingSize * embeddingSize * 3 * sizeof(float), 1);
-                layers[index].weights.attention.heads[subindex].value = calloc(embeddingSize * embeddingSize * 3 * sizeof(float), 1);
+                layers[index].weights.attention.heads[subindex].query = calloc(head_dim * embeddingSize * 3 * sizeof(float), 1);
+                layers[index].weights.attention.heads[subindex].key = calloc(head_dim * embeddingSize * 3 * sizeof(float), 1);
+                layers[index].weights.attention.heads[subindex].value = calloc(head_dim * embeddingSize * 3 * sizeof(float), 1);
                 
-                layers[index].biases.attention.heads[subindex].query = calloc(embeddingSize * 3 * sizeof(float), 1);
-                layers[index].biases.attention.heads[subindex].key = calloc(embeddingSize * 3 * sizeof(float), 1);
-                layers[index].biases.attention.heads[subindex].value = calloc(embeddingSize * 3 * sizeof(float), 1);
+                layers[index].biases.attention.heads[subindex].query = calloc(head_dim * 3 * sizeof(float), 1);
+                layers[index].biases.attention.heads[subindex].key = calloc(head_dim * 3 * sizeof(float), 1);
+                layers[index].biases.attention.heads[subindex].value = calloc(head_dim * 3 * sizeof(float), 1);
 
                 if (!layers[index].weights.attention.heads[subindex].query){
                     printf("Failed to allocate memory to initalize layers.\n");
@@ -1750,20 +1872,20 @@ int main(int argc, char** argv){
                     return 1;
                 }
 
-                for (int subindex_ = 0; subindex_ < embeddingSize * embeddingSize; subindex_++){
+                for (int subindex_ = 0; subindex_ < head_dim * embeddingSize; subindex_++){
                     layers[index].weights.attention.heads[subindex].query[subindex_ * 3] = random_range(weightsinitrange);
                     layers[index].weights.attention.heads[subindex].key[subindex_ * 3] = random_range(weightsinitrange);
                     layers[index].weights.attention.heads[subindex].value[subindex_ * 3] = random_range(weightsinitrange);
                 }
 
-                for (int subindex_ = 0; subindex_ < embeddingSize; subindex_++){
+                for (int subindex_ = 0; subindex_ < head_dim; subindex_++){
                     layers[index].biases.attention.heads[subindex].query[subindex_ * 3] = random_range(biasesinitrange);
                     layers[index].biases.attention.heads[subindex].key[subindex_ * 3] = random_range(biasesinitrange);
                     layers[index].biases.attention.heads[subindex].value[subindex_ * 3] = random_range(biasesinitrange);
                 }
             }
 
-            for (int subindex = 0; subindex < embeddingSize * (embeddingSize * heads); subindex++){
+            for (int subindex = 0; subindex < embeddingSize * (head_dim * heads); subindex++){
                 layers[index].weights.attention.output[subindex * 3] = random_range(weightsinitrange);
             }
 
@@ -1771,23 +1893,23 @@ int main(int argc, char** argv){
                 layers[index].biases.attention.output[subindex * 3] = random_range(biasesinitrange);
             }
 
-            for (int subindex = 0; subindex < embeddingSize * (embeddingSize * 4); subindex++){
+            for (int subindex = 0; subindex < embeddingSize * (embeddingSize * ffnGrowSize); subindex++){
                 layers[index].weights.feed_forward.grow[subindex * 3] = random_range(weightsinitrange);
             }
 
-            for (int subindex = 0; subindex < embeddingSize * (embeddingSize * 4); subindex++){
+            for (int subindex = 0; subindex < embeddingSize * (embeddingSize * ffnGrowSize); subindex++){
                 layers[index].weights.feed_forward.gate[subindex * 3] = random_range(weightsinitrange);
             }
 
-            for (int subindex = 0; subindex < embeddingSize * 4; subindex++){
+            for (int subindex = 0; subindex < embeddingSize * ffnGrowSize; subindex++){
                 layers[index].biases.feed_forward.grow[subindex * 3] = random_range(biasesinitrange);
             }
 
-            for (int subindex = 0; subindex < embeddingSize * 4; subindex++){
+            for (int subindex = 0; subindex < embeddingSize * ffnGrowSize; subindex++){
                 layers[index].biases.feed_forward.gate[subindex * 3] = random_range(biasesinitrange);
             }
 
-            for (int subindex = 0; subindex < (embeddingSize * 4) * embeddingSize; subindex++){
+            for (int subindex = 0; subindex < (embeddingSize * ffnGrowSize) * embeddingSize; subindex++){
                 layers[index].weights.feed_forward.shrink[subindex * 3] = random_range(weightsinitrange);
             }
 
@@ -2056,6 +2178,12 @@ int main(int argc, char** argv){
                 return 1;
             }
             heads = (int)(heads_raw->valuedouble);
+            if (embeddingSize % heads != 0){
+                printf("Model file is corrupted.\n");
+                dprintf("Err code: 0_14a\n");
+                return 1;
+            }
+            head_dim = embeddingSize / heads;
 
             biasesinitrange_raw = cJSON_GetObjectItem(model_meta, "biasesinitrange");
             if (!cJSON_IsArray(biasesinitrange_raw)){
@@ -2910,21 +3038,21 @@ int main(int argc, char** argv){
                 char head_data_path[strlen(_num) + strlen(_num2) + strlen("layers[].weights.attention.heads[].query") + 1];
                 sprintf(head_data_path, "layers[%s].weights.attention.heads[%s].query", _num, _num2);
 
-                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].query, embeddingSize * embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].query, head_dim * embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
                     return false;
                 }
 
                 sprintf(head_data_path, "layers[%s].weights.attention.heads[%s].key", _num, _num2);
-                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].key, embeddingSize * embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].key, head_dim * embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
                     return false;
                 }
 
                 sprintf(head_data_path, "layers[%s].weights.attention.heads[%s].value", _num, _num2);
-                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].value, embeddingSize * embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].weights.attention.heads[subindex].value, head_dim * embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
                     return false;
@@ -2933,7 +3061,7 @@ int main(int argc, char** argv){
 
             char attn_o_path[strlen(_num) + strlen("layers[].weights.attention.output") + 1];
             sprintf(attn_o_path, "layers[%s].weights.attention.output", _num);
-            if (!mz_zip_writer_add_mem(&zipfile, attn_o_path, layers[index].weights.attention.output, embeddingSize * (embeddingSize * heads) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, attn_o_path, layers[index].weights.attention.output, embeddingSize * (head_dim * heads) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
@@ -2941,21 +3069,21 @@ int main(int argc, char** argv){
 
             char ffw_paths[strlen(_num) + strlen("layers[].weights.feed_forward.shrink") + 1];
             sprintf(ffw_paths, "layers[%s].weights.feed_forward.grow", _num);
-            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths, layers[index].weights.feed_forward.grow, embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths, layers[index].weights.feed_forward.grow, embeddingSize * (embeddingSize * ffnGrowSize) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
 
             sprintf(ffw_paths, "layers[%s].weights.feed_forward.gate", _num);
-            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths, layers[index].weights.feed_forward.gate, embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths, layers[index].weights.feed_forward.gate, embeddingSize * (embeddingSize * ffnGrowSize) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
 
             sprintf(ffw_paths, "layers[%s].weights.feed_forward.shrink", _num);
-            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths, layers[index].weights.feed_forward.shrink, embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths, layers[index].weights.feed_forward.shrink, embeddingSize * (embeddingSize * ffnGrowSize) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
@@ -2983,21 +3111,21 @@ int main(int argc, char** argv){
                 char head_data_path[strlen(_num) + strlen(_num2) + strlen("layers[].biases.attention.heads[].query") + 1];
                 sprintf(head_data_path, "layers[%s].biases.attention.heads[%s].query", _num, _num2);
 
-                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].query, embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].query, head_dim * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
                     return false;
                 }
 
                 sprintf(head_data_path, "layers[%s].biases.attention.heads[%s].key", _num, _num2);
-                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].key, embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].key, head_dim * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
                     return false;
                 }
 
                 sprintf(head_data_path, "layers[%s].biases.attention.heads[%s].value", _num, _num2);
-                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].value, embeddingSize * 3 * sizeof(float), MZ_NO_COMPRESSION)){
+                if (!mz_zip_writer_add_mem(&zipfile, head_data_path, layers[index].biases.attention.heads[subindex].value, head_dim * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
                     return false;
@@ -3014,14 +3142,14 @@ int main(int argc, char** argv){
 
             char ffw_paths_[strlen(_num) + strlen("layers[].biases.feed_forward.shrink") + 1];
             sprintf(ffw_paths_, "layers[%s].biases.feed_forward.grow", _num);
-            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths_, layers[index].biases.feed_forward.grow, (embeddingSize * 4) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths_, layers[index].biases.feed_forward.grow, (embeddingSize * ffnGrowSize) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
 
             sprintf(ffw_paths_, "layers[%s].biases.feed_forward.gate", _num);
-            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths_, layers[index].biases.feed_forward.gate, (embeddingSize * 4) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
+            if (!mz_zip_writer_add_mem(&zipfile, ffw_paths_, layers[index].biases.feed_forward.gate, (embeddingSize * ffnGrowSize) * 3 * sizeof(float), MZ_NO_COMPRESSION)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
                 return false;
@@ -3082,22 +3210,6 @@ int main(int argc, char** argv){
         return true;
     }
 
-    float** calculate_positional_encoding(int sequence_length){
-        float** positional_encodings = malloc(sequence_length * sizeof(float*));
-        if (!positional_encodings){
-            printf("Failed to allocate memory to calculate positional encodings.\n");
-            exit(1);
-        }
-        for (int index = 0; index < sequence_length; index++){
-            positional_encodings[index] = calloc(embeddingSize * sizeof(float), 1);
-            if (!positional_encodings[index]){
-                printf("Failed to allocate memory to calculate positional encodings.\n");
-                exit(1);
-            }
-        }
-        return positional_encodings;
-    }
-
     void calculate_rope_tables(int sequence_length, float*** cos_table, float*** sin_table){
         float** cos_local = malloc(sequence_length * sizeof(float*));
         float** sin_local = malloc(sequence_length * sizeof(float*));
@@ -3106,20 +3218,20 @@ int main(int argc, char** argv){
             exit(1);
         }
         for (int index = 0; index < sequence_length; index++){
-            cos_local[index] = malloc(embeddingSize * sizeof(float));
-            sin_local[index] = malloc(embeddingSize * sizeof(float));
+            cos_local[index] = malloc(head_dim * sizeof(float));
+            sin_local[index] = malloc(head_dim * sizeof(float));
             if ((!cos_local[index]) || (!sin_local[index])){
                 printf("Failed to allocate memory to compute rotary embeddings.\n");
                 exit(1);
             }
-            for (int subindex = 0; subindex < embeddingSize; subindex += 2){
-                float denominator = powf(10000.0f, (float)(subindex) / (float)(embeddingSize));
+            for (int subindex = 0; subindex < head_dim; subindex += 2){
+                float denominator = powf(10000.0f, (float)(subindex) / (float)(head_dim));
                 float theta = index / denominator;
                 float c = cosf(theta);
                 float s = sinf(theta);
                 cos_local[index][subindex] = c;
                 sin_local[index][subindex] = s;
-                if (subindex + 1 < embeddingSize){
+                if (subindex + 1 < head_dim){
                     cos_local[index][subindex + 1] = c;
                     sin_local[index][subindex + 1] = s;
                 }
@@ -3136,6 +3248,17 @@ int main(int argc, char** argv){
         return embeddings[id];
     }
 
+    float calculate_inv_rms(float* in, int in_len){
+        float mean_sq = 0;
+        for (int index = 0; index < in_len; index++){
+            mean_sq += in[index] * in[index];
+        }
+        mean_sq = mean_sq / in_len;
+        float epsilon = 1e-5f;
+        float inv_rms = 1.0f / sqrtf(mean_sq + epsilon);
+        return inv_rms;
+    }
+
     float* _calculate_x_hat_only(float* in, int in_len){
         if (!in){
             printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
@@ -3150,7 +3273,7 @@ int main(int argc, char** argv){
         }
         mean_sq = mean_sq / in_len;
 
-        float epsilon = 1e-8f;
+        float epsilon = 1e-5f;
         float inv_rms = 1.0f / sqrtf(mean_sq + epsilon);
         
         float* x_hat = malloc(in_len * sizeof(float));
@@ -3287,40 +3410,9 @@ int main(int argc, char** argv){
         return rets;
     }
 
-    float calculate_loss(float* vec, int vec_len, int target){
-        if (!vec){
-            printf("Null dereference caught from: %p.\n", __builtin_return_address(0));
-            return 0;
-        }
-        if (vec_len < 1){
-            return 0;
-        }
-
-        if (!id_to_token(target)){
-            return 0;
-        }
-
-        float* predicted_probs = calloc(vec_len * sizeof(float), 1);
-        if (!predicted_probs){
-            printf("Failed to allocate memory to calculate loss.\n");
-            exit(1);
-        }
-        predicted_probs = softmax(vec, vec_len, predicted_probs);
-        
-        float epsilon = antiOverfittingOptimisations ? 0.1f : 0;
-
-        float loss = 0;
-        for (int index = 0; index < vocab_len; index++){
-            if (predicted_probs[index] > 0){
-                loss -= (index == target ? 1.0f - epsilon : epsilon / (vocab_len - 1)) * logf(predicted_probs[index]);
-            }
-        }
-        free(predicted_probs);
-        return loss;
-    }
-
     typedef struct {
         float** norm1_x_hat;
+        float* norm1_inv_rms;
         struct {
             float** q_vectors;
             float** k_vectors;
@@ -3330,13 +3422,16 @@ int main(int argc, char** argv){
             float** output;
         }* heads;
         float** combined;
+        float** attn_dropout_mask;
         float** norm2_x_hat;
+        float* norm2_inv_rms;
         float** norm2_output;
         float** normalized;
         struct {
             float** bigger;
             float** after_relu;
             float** final;
+            float** ff_dropout_mask;
         } feed_forward;
     } layer_cache_entry;
 
@@ -3344,24 +3439,53 @@ int main(int argc, char** argv){
         int predicted_token_id;
         struct {
             int* tokenized;
+            size_t seq_len;
             float** initial_embeddings;
             float** positional_encodings;
-            float* vocab_scores;
+            float** vocab_scores;
+            float** final_embeddings;
             layer_cache_entry* layers;
         } cache;
         bool success;
     } infret;
 
     void free_cache_object(typeof(((infret*)0)->cache) cache_object){
-        int seq_len = cache_object.tokenized[0];
-        free(cache_object.tokenized);
-        for (int index = 0; index < seq_len; index++){
-            free(cache_object.initial_embeddings[index]);
-            free(cache_object.positional_encodings[index]);
+        int seq_len = cache_object.seq_len;
+        if (cache_object.tokenized){
+            free(cache_object.tokenized);
         }
-        free(cache_object.initial_embeddings);
-        free(cache_object.positional_encodings);
-        free(cache_object.vocab_scores);
+        if (cache_object.initial_embeddings){
+            for (int index = 0; index < seq_len; index++){
+                free(cache_object.initial_embeddings[index]);
+            }
+            free(cache_object.initial_embeddings);
+        }
+        if (cache_object.positional_encodings){
+            for (int index = 0; index < seq_len; index++){
+                free(cache_object.positional_encodings[index]);
+            }
+            free(cache_object.positional_encodings);
+        }
+        if (cache_object.vocab_scores){
+            for (int index = 0; index < seq_len; index++){
+                free(cache_object.vocab_scores[index]);
+            }
+            free(cache_object.vocab_scores);
+        }
+        if (cache_object.final_embeddings){
+            bool skip_free = false;
+            if (layersAmount > 0){
+                if (cache_object.final_embeddings == cache_object.layers[layersAmount - 1].feed_forward.final){
+                    skip_free = true;
+                }
+            }
+            if (!skip_free){
+                for (int index = 0; index < seq_len; index++){
+                    free(cache_object.final_embeddings[index]);
+                }
+                free(cache_object.final_embeddings);
+            }
+        }
 
         for (int index = 0; index < layersAmount; index++){
             for (int subindex = 0; subindex < seq_len; subindex++){
@@ -3373,15 +3497,29 @@ int main(int argc, char** argv){
                 free(cache_object.layers[index].feed_forward.bigger[subindex]);
                 free(cache_object.layers[index].feed_forward.after_relu[subindex]);
                 free(cache_object.layers[index].feed_forward.final[subindex]);
+                if (cache_object.layers[index].attn_dropout_mask){
+                    free(cache_object.layers[index].attn_dropout_mask[subindex]);
+                }
+                if (cache_object.layers[index].feed_forward.ff_dropout_mask){
+                    free(cache_object.layers[index].feed_forward.ff_dropout_mask[subindex]);
+                }
             }
             free(cache_object.layers[index].norm1_x_hat);
+            free(cache_object.layers[index].norm1_inv_rms);
             free(cache_object.layers[index].norm2_x_hat);
+            free(cache_object.layers[index].norm2_inv_rms);
             free(cache_object.layers[index].norm2_output);
             free(cache_object.layers[index].normalized);
             free(cache_object.layers[index].combined);
             free(cache_object.layers[index].feed_forward.bigger);
             free(cache_object.layers[index].feed_forward.after_relu);
             free(cache_object.layers[index].feed_forward.final);
+            if (cache_object.layers[index].attn_dropout_mask){
+                free(cache_object.layers[index].attn_dropout_mask);
+            }
+            if (cache_object.layers[index].feed_forward.ff_dropout_mask){
+                free(cache_object.layers[index].feed_forward.ff_dropout_mask);
+            }
 
             for (int subindex = 0; subindex < heads; subindex++){
                 for (int subindex_ = 0; subindex_ < seq_len; subindex_++){
@@ -3405,10 +3543,22 @@ int main(int argc, char** argv){
         free(cache_object.layers);
     }
 
-    infret inference(char* context, bool return_cache, float temperature){
+    infret inference(char* context, bool return_cache, float temperature, bool verbose){
+        void verbprintf(const char *format, ...) {
+            if (!verbose) {
+                return;
+            }
+
+            va_list args;
+            va_start(args, format);
+            vprintf(format, args);
+            va_end(args);
+        }
+
         //Memory tracking system
         void** tracked = NULL;
         size_t tracked_len = 0;
+        bool track_enabled = !return_cache;
 
         int cmp_ptr(const void* a, const void* b){
             void* pa = *(void**)a;
@@ -3449,6 +3599,9 @@ int main(int argc, char** argv){
             if (!ptr){
                 //Failed alloc = no memory = can't do anything anyways = should exit.
                 failed_alloc(failed_task);
+            }
+            if (!track_enabled){
+                return ptr;
             }
             tracked_len++;
             void** tmp = realloc(tracked, tracked_len * sizeof(void*));
@@ -3506,19 +3659,33 @@ int main(int argc, char** argv){
             return true;
         }
 
-        printf("Doing inference...\n");
+        verbprintf("Doing inference...\n");
         long long timer_ = timer();
         
         infret rets = {0}; //zero every field
         
         rets.success = true; //failure will set it to false, its a sucess otherwise.
+        if (head_dim < 1){
+            printf("Head dimension is not initalized.\n");
+            rets.success = false;
+            cleanup();
+            return rets;
+        }
 
         long long subtimer = timer();
-        printf("Tokenizing input context...\n");
-        int* tokenized = track(tokenize(context), "Failed to tokenize input context.");
-        printf("Tokenized input context in %lldms.\n", timer_end(subtimer));
-        //tokenized[0] is length.
-        if (tokenized[0] > contextSize){
+        verbprintf("Tokenizing input context...\n");
+        tokenize_ret tokenized_rets = tokenize(context);
+        if (!tokenized_rets.success){
+            printf("Failed to tokenize input context in %lldms.\n", timer_end(subtimer));
+            exit(1);
+        }
+        int* tokenized = tokenized_rets.tokens;
+        if (!return_cache){
+            track(tokenized, "");
+        }
+        verbprintf("Tokenized input context in %lldms.\n", timer_end(subtimer));
+        size_t seq_len = tokenized_rets.seq_len;
+        if (seq_len > contextSize){
             printf("Provided context is larger than context size, cannot proceed.\n");
             rets.success = false;
             cleanup();
@@ -3526,81 +3693,44 @@ int main(int argc, char** argv){
         }
         
         subtimer = timer();
-        printf("Computing positional encodings...\n");
-        float** positional_encodings;
+        verbprintf("Computing rotary tables...\n");
         float** rope_cos = NULL;
         float** rope_sin = NULL;
-        if (return_cache){
-            rets.cache.tokenized = tokenized;
-            untrack(tokenized);
-            rets.cache.positional_encodings = calculate_positional_encoding(tokenized[0]);
-            if (!rets.cache.positional_encodings){
-                failed_alloc("Failed to compute positional encodings.");
-            }
-            positional_encodings = rets.cache.positional_encodings;
-        }
-        else{
-            positional_encodings = track(calculate_positional_encoding(tokenized[0]), "Failed to compute positional encodings.");
-            for (int index = 0; index < tokenized[0]; index++){
-                track(positional_encodings[index], "");
-            }
-        }
-        calculate_rope_tables(tokenized[0], &rope_cos, &rope_sin);
-        for (int index = 0; index < tokenized[0]; index++){
+        rets.cache.tokenized = return_cache ? tokenized : NULL;
+        rets.cache.seq_len = seq_len;
+        rets.cache.initial_embeddings = NULL;
+        rets.cache.positional_encodings = NULL;
+        calculate_rope_tables(seq_len, &rope_cos, &rope_sin);
+        for (int index = 0; index < seq_len; index++){
             track(rope_cos[index], "Failed to allocate memory to compute rotary embeddings.");
             track(rope_sin[index], "Failed to allocate memory to compute rotary embeddings.");
         }
         track(rope_cos, "Failed to allocate memory to compute rotary embeddings.");
         track(rope_sin, "Failed to allocate memory to compute rotary embeddings.");
-        printf("Computed positional encodings in %lldms.\n", timer_end(subtimer));
+        verbprintf("Computed rotary tables in %lldms.\n", timer_end(subtimer));
 
         subtimer = timer();
-        printf("Computing final embeddings...\n");
+        verbprintf("Computing final embeddings...\n");
         
-        if (return_cache){
-            rets.cache.initial_embeddings = calloc(tokenized[0] * sizeof(float*), 1);
-            if (!rets.cache.initial_embeddings){
-                failed_alloc("Failed memory allocation to store cache initial embeddings.");
-            }
-        }
+        float** final_embeddings = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute final embeddings.");
 
-        float** final_embeddings = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute final embeddings.");
-
-        for (int index = 1; index < tokenized[0] + 1; index++){
+        for (int index = 0; index < seq_len; index++){
             char* token = id_to_token(tokenized[index]);
             int token_id = tokenized[index];
             float* embedding = get_embedding(token_id);
             float* final_embedding = NULL;
             final_embedding = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to process embeddings.");
-            float* initial_embedding = NULL;
-            if (return_cache){
-                initial_embedding = calloc(embeddingSize * sizeof(float), 1);
-                if (!initial_embedding){
-                    failed_alloc("Failed to allocate memory to process embeddings.");
-                }
-            }
-            else{
-                initial_embedding = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to process embeddings.");
-            }
-
             for (int subindex = 0; subindex < embeddingSize; subindex++){
                 final_embedding[subindex] = embedding[subindex * 3];
-                if (return_cache){
-                    initial_embedding[subindex] = embedding[subindex * 3];
-                }
             }
 
-            if (return_cache){
-                rets.cache.initial_embeddings[index - 1] = initial_embedding;
-            }
-
-            final_embeddings[index - 1] = final_embedding;
+            final_embeddings[index] = final_embedding;
         }
 
-        printf("Computed final embeddings in %lldms.\n", timer_end(subtimer));
+        verbprintf("Computed final embeddings in %lldms.\n", timer_end(subtimer));
 
         long long layerstimer = timer();
-        printf("Computing layers...\n");
+        verbprintf("Computing layers...\n");
         if (return_cache){
             rets.cache.layers = calloc(layersAmount * sizeof(layer_cache_entry), 1);
             if (!rets.cache.layers){
@@ -3609,14 +3739,14 @@ int main(int argc, char** argv){
         }
         for (int layer = 0; layer < layersAmount; layer++){
             long long layertimer = timer();
-            printf("Computing layer %d/%d...\n", layer, layersAmount);
+            verbprintf("Computing layer %d/%d...\n", layer, layersAmount);
             
             float** normalized_embeddings = NULL;
             if (!return_cache){
-                normalized_embeddings = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute normalized embeddings.");
+                normalized_embeddings = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute normalized embeddings.");
             }
             else{
-                normalized_embeddings = malloc(tokenized[0] * sizeof(float*));
+                normalized_embeddings = malloc(seq_len * sizeof(float*));
                 if (!normalized_embeddings){
                     failed_alloc("Failed to allocate memory to compute normalized embeddings.");
                 }
@@ -3625,14 +3755,19 @@ int main(int argc, char** argv){
             float* norm1_weights = layers[layer].weights.normalize_1;
             float* norm1_biases = layers[layer].biases.normalize_1;
             if (return_cache){
-                rets.cache.layers[layer].norm1_x_hat = malloc(tokenized[0] * sizeof(float*));
+                rets.cache.layers[layer].norm1_x_hat = malloc(seq_len * sizeof(float*));
                 if (!rets.cache.layers[layer].norm1_x_hat){
                     failed_alloc("Failed to allocate memory to cache normalize 1 x hats.");
                 }
+                rets.cache.layers[layer].norm1_inv_rms = malloc(seq_len * sizeof(float));
+                if (!rets.cache.layers[layer].norm1_inv_rms){
+                    failed_alloc("Failed to allocate memory to cache norm1 inv rms.");
+                }
             }
 
-            for (int index = 0; index < tokenized[0]; index++){
+            for (int index = 0; index < seq_len; index++){
                 float* x_hat_for_cache_1;
+                float inv_rms_1 = 0;
                 if (return_cache){
                     x_hat_for_cache_1 = _calculate_x_hat_only(final_embeddings[index], embeddingSize);
                 
@@ -3640,6 +3775,11 @@ int main(int argc, char** argv){
                         failed_alloc("Failed to compute x hat for cache 1.");
                     }
                     rets.cache.layers[layer].norm1_x_hat[index] = x_hat_for_cache_1;
+                    inv_rms_1 = calculate_inv_rms(final_embeddings[index], embeddingSize);
+                    rets.cache.layers[layer].norm1_inv_rms[index] = inv_rms_1;
+                }
+                else{
+                    inv_rms_1 = calculate_inv_rms(final_embeddings[index], embeddingSize);
                 }
 
                 float* final_norm_1_output = NULL;
@@ -3676,103 +3816,103 @@ int main(int argc, char** argv){
                 float** k_vectors = NULL;
                 float** v_vectors = NULL;
                 if (return_cache){
-                    q_vectors = malloc(tokenized[0] * sizeof(float*));
-                    k_vectors = malloc(tokenized[0] * sizeof(float*));
-                    v_vectors = malloc(tokenized[0] * sizeof(float*));
+                    q_vectors = malloc(seq_len * sizeof(float*));
+                    k_vectors = malloc(seq_len * sizeof(float*));
+                    v_vectors = malloc(seq_len * sizeof(float*));
 
                     if ((!q_vectors) || (!k_vectors) || (!v_vectors)){
                         failed_alloc("Failed to allocate memory to store q/k/v vectors.");
                     }
                 }
                 else{
-                    q_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store q vectors.");
-                    k_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store k vectors.");
-                    v_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store v vectors.");
+                    q_vectors = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to store q vectors.");
+                    k_vectors = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to store k vectors.");
+                    v_vectors = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to store v vectors.");
                 }
 
-                for (int index = 0; index < tokenized[0]; index++){
+                for (int index = 0; index < seq_len; index++){
                     if (return_cache){
-                        q_vectors[index] = calloc(embeddingSize * sizeof(float), 1);
-                        k_vectors[index] = calloc(embeddingSize * sizeof(float), 1);
-                        v_vectors[index] = calloc(embeddingSize * sizeof(float), 1);
+                    q_vectors[index] = calloc(head_dim * sizeof(float), 1);
+                    k_vectors[index] = calloc(head_dim * sizeof(float), 1);
+                    v_vectors[index] = calloc(head_dim * sizeof(float), 1);
 
                         if ((!q_vectors[index]) || (!k_vectors[index]) || (!v_vectors[index])){
                             failed_alloc("Failed to allocate memory to store q/k/v vectors.");
                         }
                     }
                     else{
-                        q_vectors[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to store q vectors.");
-                        k_vectors[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to store k vectors.");
-                        v_vectors[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to store v vectors.");
+                        q_vectors[index] = track(calloc(head_dim * sizeof(float), 1), "Failed to allocate memory to store q vectors.");
+                        k_vectors[index] = track(calloc(head_dim * sizeof(float), 1), "Failed to allocate memory to store k vectors.");
+                        v_vectors[index] = track(calloc(head_dim * sizeof(float), 1), "Failed to allocate memory to store v vectors.");
                     }
                 }
 
                 float** attention_scores = NULL;
                 if (return_cache){
-                    attention_scores = malloc(tokenized[0] * sizeof(float*));
+                    attention_scores = malloc(seq_len * sizeof(float*));
                     if (!attention_scores){
                         failed_alloc("Failed to allocate memory to store attention scores.");
                     }
                 }
                 else{
-                    attention_scores = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store attention scores.");
+                    attention_scores = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to store attention scores.");
                 }
 
-                for (int index = 0; index < tokenized[0]; index++){
+                for (int index = 0; index < seq_len; index++){
                     if (return_cache){
-                        attention_scores[index] = calloc(tokenized[0] * sizeof(float), 1);
+                        attention_scores[index] = calloc(seq_len * sizeof(float), 1);
                         if (!attention_scores[index]){
                             failed_alloc("Failed to allocate memory to store attention scores.");
                         }
                     }
                     else{
-                        attention_scores[index] = track(calloc(tokenized[0] * sizeof(float), 1), "Failed to allocate memory to store attention scores.");
+                        attention_scores[index] = track(calloc(seq_len * sizeof(float), 1), "Failed to allocate memory to store attention scores.");
                     }
                 }
 
                 float** attention_probs = NULL;
                 if (return_cache){
-                    attention_probs = malloc(tokenized[0] * sizeof(float*));
+                    attention_probs = malloc(seq_len * sizeof(float*));
                     if (!attention_probs){
                         failed_alloc("Failed to allocate memory to store attention probs.");
                     }
                 }
                 else{
-                    attention_probs = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store attention probs.");
+                    attention_probs = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to store attention probs.");
                 }
 
-                for (int index = 0; index < tokenized[0]; index++){
+                for (int index = 0; index < seq_len; index++){
                     if (return_cache){
-                        attention_probs[index] = calloc(tokenized[0] * sizeof(float), 1);
+                        attention_probs[index] = calloc(seq_len * sizeof(float), 1);
                         if (!attention_probs[index]){
                             failed_alloc("Failed to allocate memory to store attention probs.");
                         }
                     }
                     else{
-                        attention_probs[index] = track(calloc(tokenized[0] * sizeof(float), 1), "Failed to allocate memory to store attention probs.");
+                        attention_probs[index] = track(calloc(seq_len * sizeof(float), 1), "Failed to allocate memory to store attention probs.");
                     }
                 }
 
                 float** post_attention_vectors = NULL;
                 if (return_cache){
-                    post_attention_vectors = malloc(tokenized[0] * sizeof(float*));
+                    post_attention_vectors = malloc(seq_len * sizeof(float*));
                     if (!post_attention_vectors){
                         failed_alloc("Failed to allocate memory to store post attention vectors.");
                     }
                 }
                 else{
-                    post_attention_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store post attention vectors.");
+                    post_attention_vectors = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to store post attention vectors.");
                 }
 
-                for (int index = 0; index < tokenized[0]; index++){
+                for (int index = 0; index < seq_len; index++){
                     if (return_cache){
-                        post_attention_vectors[index] = calloc(embeddingSize * sizeof(float), 1);
+                        post_attention_vectors[index] = calloc(head_dim * sizeof(float), 1);
                         if (!post_attention_vectors[index]){
                             failed_alloc("Failed to allocate memory to store post attention vectors.");
                         }
                     }
                     else{
-                        post_attention_vectors[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to store post attention vectors.");
+                        post_attention_vectors[index] = track(calloc(head_dim * sizeof(float), 1), "Failed to allocate memory to store post attention vectors.");
                     }
                 }
 
@@ -3787,10 +3927,10 @@ int main(int argc, char** argv){
                 float* head_key_biases = head_biases.key;
                 float* head_value_biases = head_biases.value;
 
-                for (int index = 0; index < tokenized[0]; index++){
+                for (int index = 0; index < seq_len; index++){
                     float* token_embedding = normalized_embeddings[index];
                     // Q
-                    for (int pos = 0; pos < embeddingSize; pos++){
+                    for (int pos = 0; pos < head_dim; pos++){
                         float q_sum = 0;
                         for (int subindex = 0; subindex < embeddingSize; subindex++){
                             q_sum += token_embedding[subindex] * head_query_weights[pos * embeddingSize * 3 + subindex * 3];
@@ -3798,7 +3938,7 @@ int main(int argc, char** argv){
                         q_vectors[index][pos] = q_sum + head_query_biases[pos * 3];
                     }
                     // K
-                    for (int pos = 0; pos < embeddingSize; pos++){
+                    for (int pos = 0; pos < head_dim; pos++){
                         float k_sum = 0;
                         for (int subindex = 0; subindex < embeddingSize; subindex++){
                             k_sum += token_embedding[subindex] * head_key_weights[pos * embeddingSize * 3 + subindex * 3];
@@ -3807,14 +3947,14 @@ int main(int argc, char** argv){
                     }
 
                     // V
-                    for (int pos = 0; pos < embeddingSize; pos++){
+                    for (int pos = 0; pos < head_dim; pos++){
                         float v_sum = 0;
                         for (int subindex = 0; subindex < embeddingSize; subindex++){
                             v_sum += token_embedding[subindex] * head_value_weights[pos * embeddingSize * 3 + subindex * 3];
                         }
                         v_vectors[index][pos] = v_sum + head_value_biases[pos * 3];
                     }
-                    for (int subindex = 0; subindex + 1 < embeddingSize; subindex += 2){
+                    for (int subindex = 0; subindex + 1 < head_dim; subindex += 2){
                         float c = rope_cos[index][subindex];
                         float s = rope_sin[index][subindex];
                         float q_even = q_vectors[index][subindex];
@@ -3829,31 +3969,31 @@ int main(int argc, char** argv){
                 }
                 
                 //Attention scores
-                for (int index = 0; index < tokenized[0]; index++){
-                    for (int subindex = 0; subindex < tokenized[0]; subindex++){
+                for (int index = 0; index < seq_len; index++){
+                    for (int subindex = 0; subindex < seq_len; subindex++){
                         if (subindex > index){
                             attention_scores[index][subindex] = -1e9f;
                             continue;
                         }
-                        attention_scores[index][subindex] = dot_product(q_vectors[index], embeddingSize, k_vectors[subindex], embeddingSize);
+                        attention_scores[index][subindex] = dot_product(q_vectors[index], head_dim, k_vectors[subindex], head_dim);
                     }
                 }
 
-                for (int index = 0; index < tokenized[0]; index++){
-                    for (int subindex = 0; subindex < tokenized[0]; subindex++){
+                for (int index = 0; index < seq_len; index++){
+                    for (int subindex = 0; subindex < seq_len; subindex++){
                         if (attention_scores[index][subindex] != -1e9f){
-                            attention_scores[index][subindex] /= sqrtf(embeddingSize);
+                            attention_scores[index][subindex] /= sqrtf((float)(head_dim));
                         }
                     }
                 }
 
-                for (int index = 0; index < tokenized[0]; index++){
-                    attention_probs[index] = softmax(attention_scores[index], tokenized[0], attention_probs[index]);
+                for (int index = 0; index < seq_len; index++){
+                    attention_probs[index] = softmax(attention_scores[index], seq_len, attention_probs[index]);
                 }
 
-                for (int index = 0; index < tokenized[0]; index++){
-                    for (int subindex = 0; subindex < embeddingSize; subindex++){
-                        for (int subindex_ = 0; subindex_ < tokenized[0]; subindex_++){
+                for (int index = 0; index < seq_len; index++){
+                    for (int subindex = 0; subindex < head_dim; subindex++){
+                        for (int subindex_ = 0; subindex_ < seq_len; subindex_++){
                             post_attention_vectors[index][subindex] += v_vectors[subindex_][subindex] * attention_probs[index][subindex_];
                         }
                     }
@@ -3873,16 +4013,16 @@ int main(int argc, char** argv){
 
             float** combined_vectors = NULL;
             if (return_cache){
-                combined_vectors = malloc(tokenized[0] * sizeof(float*));
+                combined_vectors = malloc(seq_len * sizeof(float*));
                 if (!combined_vectors){
                     failed_alloc("Failed to allocate memory to store combined vectors.");
                 }
             }
             else{
-                combined_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store combined vectors.");
+                combined_vectors = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to store combined vectors.");
             }
 
-            for (int index = 0; index < tokenized[0]; index++){
+            for (int index = 0; index < seq_len; index++){
                 if (return_cache){
                     combined_vectors[index] = calloc(embeddingSize * sizeof(float), 1);
                     if (!combined_vectors[index]){
@@ -3894,7 +4034,7 @@ int main(int argc, char** argv){
                 }
             }
 
-            float* concatenated = calloc(embeddingSize * heads * sizeof(float), 1);
+            float* concatenated = calloc(head_dim * heads * sizeof(float), 1);
             if (!concatenated){
                 failed_alloc("Failed to allocate memory to store concatenated heads.");
             }
@@ -3906,16 +4046,16 @@ int main(int argc, char** argv){
             float* output_weights = layers[layer].weights.attention.output;
             float* output_biases = layers[layer].biases.attention.output;
 
-            for (int index = 0; index < tokenized[0]; index++){
+            for (int index = 0; index < seq_len; index++){
                 int current_offset = 0;
                 for (int subindex = 0; subindex < heads; subindex++){
-                    memcpy(concatenated + current_offset, head_outputs[subindex][index], embeddingSize * sizeof(float));
-                    current_offset += embeddingSize;
+                    memcpy(concatenated + current_offset, head_outputs[subindex][index], head_dim * sizeof(float));
+                    current_offset += head_dim;
                 }
                 for (int subindex = 0; subindex < embeddingSize; subindex++){
                     float pos_sum = 0;
-                    for (int subindex_ = 0; subindex_ < embeddingSize * heads; subindex_++){
-                        pos_sum += concatenated[subindex_] * output_weights[subindex * (embeddingSize * heads) * 3 + subindex_ * 3];
+                    for (int subindex_ = 0; subindex_ < head_dim * heads; subindex_++){
+                        pos_sum += concatenated[subindex_] * output_weights[subindex * (head_dim * heads) * 3 + subindex_ * 3];
                     }
                     output_vector[subindex] = pos_sum + output_biases[subindex * 3];
                 }
@@ -3924,28 +4064,28 @@ int main(int argc, char** argv){
             free(output_vector);
             free(concatenated);
 
-            if (return_cache){ //cache = training
-                float dropout_rate = 0;
-                if (antiOverfittingOptimisations){
-                    dropout_rate = 0.1;
+            if (return_cache && antiOverfittingOptimisations){ //cache = training
+                float dropout_rate = 0.1f;
+                rets.cache.layers[layer].attn_dropout_mask = malloc(seq_len * sizeof(float*));
+                if (!rets.cache.layers[layer].attn_dropout_mask){
+                    failed_alloc("Failed to allocate memory to store attention dropout mask.");
                 }
-                if (dropout_rate > 0){
-                    for (int index = 0; index < tokenized[0]; index++){
-                        for (int subindex = 0; subindex < embeddingSize; subindex++){
-                            float range[] = {0, 0.99999994f};
-                            float random_n = random_range(range);
-                            if (random_n < dropout_rate){
-                                combined_vectors[index][subindex] = 0;
-                            }
-                            else{
-                                combined_vectors[index][subindex] /= (1 - dropout_rate);
-                            }
-                        }
+                for (int index = 0; index < seq_len; index++){
+                    rets.cache.layers[layer].attn_dropout_mask[index] = malloc(embeddingSize * sizeof(float));
+                    if (!rets.cache.layers[layer].attn_dropout_mask[index]){
+                        failed_alloc("Failed to allocate memory to store attention dropout mask.");
+                    }
+                    for (int subindex = 0; subindex < embeddingSize; subindex++){
+                        float range[] = {0, 0.99999994f};
+                        float random_n = random_range(range);
+                        float mask_val = (random_n < dropout_rate) ? 0.0f : (1.0f / (1.0f - dropout_rate));
+                        rets.cache.layers[layer].attn_dropout_mask[index][subindex] = mask_val;
+                        combined_vectors[index][subindex] *= mask_val;
                     }
                 }
             }
 
-            for (int index = 0; index < tokenized[0]; index++){
+            for (int index = 0; index < seq_len; index++){
                 for (int subindex = 0; subindex < embeddingSize; subindex++){
                     float residual_scale = 0.70710678f;
                     combined_vectors[index][subindex] = (combined_vectors[index][subindex] + final_embeddings[index][subindex]) * residual_scale;
@@ -3960,23 +4100,27 @@ int main(int argc, char** argv){
             float* norm2_biases = layers[layer].biases.normalize_2;
             float** normalized_vectors = NULL;
             if (return_cache){
-                normalized_vectors = malloc(tokenized[0] * sizeof(float*));
+                normalized_vectors = malloc(seq_len * sizeof(float*));
                 if (!normalized_vectors){
                     failed_alloc("Failed to allocate memory to store normalized vectors.");
                 }
+                rets.cache.layers[layer].norm2_inv_rms = malloc(seq_len * sizeof(float));
+                if (!rets.cache.layers[layer].norm2_inv_rms){
+                    failed_alloc("Failed to allocate memory to store norm2 inv rms.");
+                }
             }
             else{
-                normalized_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to store normalized vectors.");
+                normalized_vectors = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to store normalized vectors.");
             }
 
             if (return_cache){
-                rets.cache.layers[layer].norm2_x_hat = malloc(tokenized[0] * sizeof(float*));
+                rets.cache.layers[layer].norm2_x_hat = malloc(seq_len * sizeof(float*));
                 if (!rets.cache.layers[layer].norm2_x_hat){
                     failed_alloc("Failed to allocate memory to store norm 2 x hats.");
                 }
             }
 
-            for (int index = 0; index < tokenized[0]; index++){
+            for (int index = 0; index < seq_len; index++){
                 if (return_cache){
                     float* norm2_x_hat = _calculate_x_hat_only(combined_vectors[index], embeddingSize);
                     if (!norm2_x_hat){
@@ -3984,6 +4128,8 @@ int main(int argc, char** argv){
                         exit(1);
                     }
                     rets.cache.layers[layer].norm2_x_hat[index] = norm2_x_hat;
+                    float inv_rms_2 = calculate_inv_rms(combined_vectors[index], embeddingSize);
+                    rets.cache.layers[layer].norm2_inv_rms[index] = inv_rms_2;
                 }
 
                 float* final_norm2 = NULL;
@@ -4007,8 +4153,8 @@ int main(int argc, char** argv){
             float** bigger_vectors = NULL;
             float** gate_vectors = NULL;
             if (return_cache){
-                bigger_vectors = malloc(tokenized[0] * sizeof(float*));
-                gate_vectors = malloc(tokenized[0] * sizeof(float*));
+                bigger_vectors = malloc(seq_len * sizeof(float*));
+                gate_vectors = malloc(seq_len * sizeof(float*));
                 if (!bigger_vectors){
                     failed_alloc("Failed to allocate memory to compute ffw grow.");
                 }
@@ -4017,26 +4163,26 @@ int main(int argc, char** argv){
                 }
             }
             else{
-                bigger_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute ffw grow.");
-                gate_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute ffw gate.");
+                bigger_vectors = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute ffw grow.");
+                gate_vectors = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute ffw gate.");
             }
 
             if (return_cache){
-                for (int index = 0; index < tokenized[0]; index++){
-                    bigger_vectors[index] = calloc(embeddingSize * 4 * sizeof(float), 1);
+                for (int index = 0; index < seq_len; index++){
+                    bigger_vectors[index] = calloc(embeddingSize * ffnGrowSize * sizeof(float), 1);
                     if (!bigger_vectors[index]){
                         failed_alloc("Failed to allocate memory to compute ffw grow.");
                     }
-                    gate_vectors[index] = calloc(embeddingSize * 4 * sizeof(float), 1);
+                    gate_vectors[index] = calloc(embeddingSize * ffnGrowSize * sizeof(float), 1);
                     if (!gate_vectors[index]){
                         failed_alloc("Failed to allocate memory to compute ffw gate.");
                     }
                 }
             }
             else{
-                for (int index = 0; index < tokenized[0]; index++){
-                    bigger_vectors[index] = track(calloc(embeddingSize * 4 * sizeof(float), 1), "Failed toa llocate memory to compute ffw grow.");
-                    gate_vectors[index] = track(calloc(embeddingSize * 4 * sizeof(float), 1), "Failed toa llocate memory to compute ffw gate.");
+                for (int index = 0; index < seq_len; index++){
+                    bigger_vectors[index] = track(calloc(embeddingSize * ffnGrowSize * sizeof(float), 1), "Failed toa llocate memory to compute ffw grow.");
+                    gate_vectors[index] = track(calloc(embeddingSize * ffnGrowSize * sizeof(float), 1), "Failed toa llocate memory to compute ffw gate.");
                 }
             }
 
@@ -4044,13 +4190,13 @@ int main(int argc, char** argv){
             float* grow_biases = layers[layer].biases.feed_forward.grow;
             float* gate_weights = layers[layer].weights.feed_forward.gate;
             float* gate_biases = layers[layer].biases.feed_forward.gate;
-            for (int index = 0; index < tokenized[0]; index++){
-                for (int subindex = 0; subindex < embeddingSize * 4; subindex++){
+            for (int index = 0; index < seq_len; index++){
+                for (int subindex = 0; subindex < embeddingSize * ffnGrowSize; subindex++){
                     float sum_val = 0;
                     float gate_sum = 0;
                     for (int subindex_ = 0; subindex_ < embeddingSize; subindex_++){
-                        sum_val += normalized_vectors[index][subindex_] * grow_weights[subindex_ * (embeddingSize * 4) * 3 + subindex * 3];
-                        gate_sum += normalized_vectors[index][subindex_] * gate_weights[subindex_ * (embeddingSize * 4) * 3 + subindex * 3];
+                        sum_val += normalized_vectors[index][subindex_] * grow_weights[subindex_ * (embeddingSize * ffnGrowSize) * 3 + subindex * 3];
+                        gate_sum += normalized_vectors[index][subindex_] * gate_weights[subindex_ * (embeddingSize * ffnGrowSize) * 3 + subindex * 3];
                     }
                     bigger_vectors[index][subindex] = sum_val + grow_biases[subindex * 3];
                     gate_vectors[index][subindex] = gate_sum + gate_biases[subindex * 3];
@@ -4068,65 +4214,76 @@ int main(int argc, char** argv){
 
             float** final_big_vectors = NULL;
             if (return_cache){
-                final_big_vectors = malloc(tokenized[0] * sizeof(float*));
+                final_big_vectors = malloc(seq_len * sizeof(float*));
                 if (!final_big_vectors){
                     failed_alloc("Failed to allocate memory to compute fused ffw output.");
                 }
             }
             else{
-                final_big_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute fused ffw output.");
+                final_big_vectors = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute fused ffw output.");
             }
 
-            for (int index = 0; index < tokenized[0]; index++){
+            for (int index = 0; index < seq_len; index++){
                 if (return_cache){
-                    final_big_vectors[index] = calloc(embeddingSize * 4 * sizeof(float), 1);
+                    final_big_vectors[index] = calloc(embeddingSize * ffnGrowSize * sizeof(float), 1);
                     if (!final_big_vectors[index]){
                         failed_alloc("Failed to allocate memory to compute fused ffw output.");
                     }
                 }
                 else{
-                    final_big_vectors[index] = track(calloc(embeddingSize * 4 * sizeof(float), 1), "Failed to allocate memory to compute fused ffw output.");
+                    final_big_vectors[index] = track(calloc(embeddingSize * ffnGrowSize * sizeof(float), 1), "Failed to allocate memory to compute fused ffw output.");
                 }
             }
 
-            float dropout_rate = 0;
             if (return_cache && antiOverfittingOptimisations){
-                dropout_rate = 0.1f;
-            }
-
-            for (int index = 0; index < tokenized[0]; index++){
-                for (int subindex = 0; subindex < embeddingSize * 4; subindex++){
-                    float gate_pre = gate_vectors[index][subindex];
-                    float sig = sigmoid_scalar(gate_pre);
-                    float gate_act = gate_pre * sig;
-                    float fused = bigger_vectors[index][subindex] * gate_act;
-                    if (dropout_rate > 0){
+                float dropout_rate = 0.1f;
+                rets.cache.layers[layer].feed_forward.ff_dropout_mask = malloc(seq_len * sizeof(float*));
+                if (!rets.cache.layers[layer].feed_forward.ff_dropout_mask){
+                    failed_alloc("Failed to allocate memory to store ff dropout mask.");
+                }
+                for (int index = 0; index < seq_len; index++){
+                    rets.cache.layers[layer].feed_forward.ff_dropout_mask[index] = malloc(embeddingSize * ffnGrowSize * sizeof(float));
+                    if (!rets.cache.layers[layer].feed_forward.ff_dropout_mask[index]){
+                        failed_alloc("Failed to allocate memory to store ff dropout mask.");
+                    }
+                    for (int subindex = 0; subindex < embeddingSize * ffnGrowSize; subindex++){
+                        float gate_pre = gate_vectors[index][subindex];
+                        float sig = sigmoid_scalar(gate_pre);
+                        float gate_act = gate_pre * sig;
+                        float fused = bigger_vectors[index][subindex] * gate_act;
                         float range[] = {0, 0.99999994f};
                         float random_n = random_range(range);
-                        if (random_n < dropout_rate){
-                            fused = 0;
-                        }
-                        else{
-                            fused /= (1 - dropout_rate);
-                        }
+                        float mask_val = (random_n < dropout_rate) ? 0.0f : (1.0f / (1.0f - dropout_rate));
+                        rets.cache.layers[layer].feed_forward.ff_dropout_mask[index][subindex] = mask_val;
+                        final_big_vectors[index][subindex] = fused * mask_val;
                     }
-                    final_big_vectors[index][subindex] = fused;
+                }
+            }
+            else{
+                for (int index = 0; index < seq_len; index++){
+                    for (int subindex = 0; subindex < embeddingSize * ffnGrowSize; subindex++){
+                        float gate_pre = gate_vectors[index][subindex];
+                        float sig = sigmoid_scalar(gate_pre);
+                        float gate_act = gate_pre * sig;
+                        float fused = bigger_vectors[index][subindex] * gate_act;
+                        final_big_vectors[index][subindex] = fused;
+                    }
                 }
             }
 
             float** final_vectors = NULL;
             if (return_cache){
-                final_vectors = malloc(tokenized[0] * sizeof(float*));
+                final_vectors = malloc(seq_len * sizeof(float*));
                 if (!final_vectors){
                     failed_alloc("Failed to allocate memory to compute ffw shrink.");
                 }
             }
             else{
-                final_vectors = track(malloc(tokenized[0] * sizeof(float*)), "Failed to allocate memory to compute ffw shrink.");
+                final_vectors = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute ffw shrink.");
             }
 
             if (return_cache){
-                for (int index = 0; index < tokenized[0]; index++){
+                for (int index = 0; index < seq_len; index++){
                     final_vectors[index] = calloc(embeddingSize * sizeof(float), 1);
                     if (!final_vectors[index]){
                         failed_alloc("Failed to allocate memory to compute ffw shrink.");
@@ -4134,7 +4291,7 @@ int main(int argc, char** argv){
                 }
             }
             else{
-                for (int index = 0; index < tokenized[0]; index++){
+                for (int index = 0; index < seq_len; index++){
                     final_vectors[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to compute ffw shrink.");
                 }
             }
@@ -4142,17 +4299,17 @@ int main(int argc, char** argv){
             float* shrink_weights = layers[layer].weights.feed_forward.shrink;
             float* shrink_biases = layers[layer].biases.feed_forward.shrink;
 
-            for (int index = 0; index < tokenized[0]; index++){
+            for (int index = 0; index < seq_len; index++){
                 for (int subindex = 0; subindex < embeddingSize; subindex++){
                     float accum = 0;
-                    for (int subindex_ = 0; subindex_ < embeddingSize * 4; subindex_++){
-                        accum += final_big_vectors[index][subindex_] * shrink_weights[subindex * (embeddingSize * 4) * 3 + subindex_ * 3];
+                    for (int subindex_ = 0; subindex_ < embeddingSize * ffnGrowSize; subindex_++){
+                        accum += final_big_vectors[index][subindex_] * shrink_weights[subindex * (embeddingSize * ffnGrowSize) * 3 + subindex_ * 3];
                     }
                     final_vectors[index][subindex] = accum + shrink_biases[subindex * 3];
                 }
             }
 
-            for (int index = 0; index < tokenized[0]; index++){
+            for (int index = 0; index < seq_len; index++){
                 float* residual = combined_vectors[index];
                 for (int subindex = 0; subindex < embeddingSize; subindex++){
                     float residual_scale = 0.70710678f;
@@ -4165,33 +4322,53 @@ int main(int argc, char** argv){
             }
             
             final_embeddings = final_vectors; //Output of this layer becomes input for the next
-            printf("Computed layer %d/%d in %lldms.\n", layer + 1, layersAmount, timer_end(layertimer));
+            verbprintf("Computed layer %d/%d in %lldms.\n", layer + 1, layersAmount, timer_end(layertimer));
         }
-        printf("Computed all (%d) layers in %lldms.\n", layersAmount, timer_end(layerstimer));
-        long long timer_token = timer();
-        printf("Computing next token...\n");
-        float* last_token_embedding = final_embeddings[tokenized[0] - 1];
-        float* scores = NULL;
+        verbprintf("Computed all (%d) layers in %lldms.\n", layersAmount, timer_end(layerstimer));
+
         if (return_cache){
-            scores = calloc(vocab_len * sizeof(float), 1);
+            for (int index = 0; index < seq_len; index++){
+                free(rope_cos[index]);
+                free(rope_sin[index]);
+            }
+            free(rope_cos);
+            free(rope_sin);
+        }
+        long long timer_token = timer();
+        verbprintf("Computing next token...\n");
+        float** scores = NULL;
+        if (return_cache){
+            scores = malloc(seq_len * sizeof(float*));
             if (!scores){
                 failed_alloc("Failed to allocate memory to compute next token.");
             }
         }
         else{
-            scores = track(calloc(vocab_len * sizeof(float), 1), "Failed to allocate memory to compute next token.");
+            scores = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute next token.");
         }
 
         float* vocab_weights = vocab_projection.weights;
         float* vocab_biases = vocab_projection.biases;
 
-        for (int index = 0; index < vocab_len; index++){
-            float score = 0;
-            for (int subindex = 0; subindex < embeddingSize; subindex++){
-                score += last_token_embedding[subindex] * vocab_weights[index * embeddingSize * 3 + subindex * 3];
+        for (int pos = 0; pos < seq_len; pos++){
+            if (return_cache){
+                scores[pos] = calloc(vocab_len * sizeof(float), 1);
+                if (!scores[pos]){
+                    failed_alloc("Failed to allocate memory to compute next token.");
+                }
             }
-            score += vocab_biases[index * 3];
-            scores[index] = score;
+            else{
+                scores[pos] = track(calloc(vocab_len * sizeof(float), 1), "Failed to allocate memory to compute next token.");
+            }
+            float* token_emb = final_embeddings[pos];
+            for (int index = 0; index < vocab_len; index++){
+                float score = 0;
+                for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    score += token_emb[subindex] * vocab_weights[index * embeddingSize * 3 + subindex * 3];
+                }
+                score += vocab_biases[index * 3];
+                scores[pos][index] = score;
+            }
         }
 
         if (return_cache){
@@ -4202,7 +4379,7 @@ int main(int argc, char** argv){
             float highest_score = -FLT_MAX;
             int next_token_index = 0;
             for (int index = 0; index < vocab_len; index++){
-                float score = scores[index];
+                float score = scores[seq_len - 1][index];
                 if (score > highest_score){
                     highest_score = score;
                     next_token_index = index;
@@ -4214,7 +4391,7 @@ int main(int argc, char** argv){
         else{
             float* scaled_scores = track(calloc(vocab_len * sizeof(float), 1), "Failed to allocate memory to apply temperature to inference prediction.");
             for (int index = 0; index < vocab_len; index++){
-                scaled_scores[index] = scores[index] / temperature;
+                scaled_scores[index] = scores[seq_len - 1][index] / temperature;
             }
             float* probs = track(calloc(vocab_len * sizeof(float), 1), "Failed to allocate memory to apply temperature to inference prediction.");
             probs = softmax(scaled_scores, vocab_len, probs);
@@ -4233,9 +4410,20 @@ int main(int argc, char** argv){
             rets.predicted_token_id = next_token_index;
         }
 
-        printf("Computed next token in %lldms.\n", timer_end(timer_token));
+        verbprintf("Computed next token in %lldms.\n", timer_end(timer_token));
+        if (return_cache){
+            rets.cache.final_embeddings = final_embeddings;
+        }
+        else{
+            for (int index = 0; index < seq_len; index++){
+                untrack(final_embeddings[index]);
+                free(final_embeddings[index]);
+            }
+            untrack(final_embeddings);
+            free(final_embeddings);
+        }
         cleanup();
-        printf("Did inference in %lldms.\n", timer_end(timer_));
+        verbprintf("Did inference in %lldms.\n", timer_end(timer_));
         return rets;
     }
 
@@ -4301,7 +4489,7 @@ int main(int argc, char** argv){
 
     train_step_ret train_step(char* context, train_step_token target_token){
         //I will be computing this once and only once for this function
-        float scale = sqrtf(embeddingSize);
+        float scale = sqrtf(head_dim);
 
         //Memory tracking system
         void** tracked = NULL;
@@ -4417,13 +4605,18 @@ int main(int argc, char** argv){
         rets.layer_grads = notrack(malloc(layersAmount * sizeof(layer)), "Failed to allocate memory to store layer gradients.");
 
         rets.success = true;
+        if (head_dim < 1){
+            printf("Head dimension is not initalized.\n");
+            rets.success = false;
+            return rets;
+        }
 
         long long timer_ = timer();
         printf("Starting training step...\n");
         
         long long inference_cache_timer = timer();
         printf("Running inference to get cache.\n");
-        infret inference_result = inference(context, true, 0);
+        infret inference_result = inference(context, true, 0, true);
         if (!inference_result.success){
             printf("Failed to get inference cache in %lldms.\n", timer_end(inference_cache_timer));
             printf("Failed train step in %lldms.\n", timer_end(timer_));
@@ -4434,66 +4627,80 @@ int main(int argc, char** argv){
         
         typeof(((infret*)0)->cache) cache = inference_result.cache;
 
-        int seq_len = cache.tokenized[0];
+        int seq_len = cache.seq_len;
         rets.seq_len = seq_len;
 
         long long calculate_loss_timer = timer();
         printf("Calculating initial loss...\n");
-        float initial_loss = calculate_loss(cache.vocab_scores, vocab_len, target_token.token_id);
+        float total_loss = 0.0f;
+        int loss_terms = 0;
+
+        float epsilon_grad = antiOverfittingOptimisations ? 0.1f : 0.0f;
+
+        float** predicted_probs = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute predicted probs.");
+        float** initial_error = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute initial error.");
+
+        for (int pos = 0; pos < seq_len; pos++){
+            predicted_probs[pos] = track(calloc(vocab_len * sizeof(float), 1), "Failed to allocate memory to compute predicted probs.");
+            initial_error[pos] = track(calloc(vocab_len * sizeof(float), 1), "Failed to allocate memory to compute initial error.");
+
+            predicted_probs[pos] = softmax(cache.vocab_scores[pos], vocab_len, predicted_probs[pos]);
+
+            int target_id;
+            if (pos < seq_len - 1){
+                target_id = cache.tokenized[pos + 1];
+            }
+            else{
+                target_id = target_token.token_id;
+            }
+
+            for (int index = 0; index < vocab_len; index++){
+                float target_val = epsilon_grad / (vocab_len - 1);
+                if (index == target_id){
+                    target_val = 1.0f - epsilon_grad;
+                }
+                total_loss += -target_val * logf(predicted_probs[pos][index] + 1e-12f);
+                initial_error[pos][index] = predicted_probs[pos][index] - target_val;
+            }
+            loss_terms++;
+        }
+
+        float initial_loss = (loss_terms > 0) ? (total_loss / loss_terms) : 0.0f;
         rets.initial_loss = initial_loss;
         printf("Calculated initial loss (%.3f) in %lldms.\n", initial_loss, timer_end(calculate_loss_timer));
         
         printf("Computing gradients...\n");
-        
-        float* predicted_probs = track(calloc(vocab_len * sizeof(float), 1), "Failed to allocate memory to compute predicted probs.");
-        float* target_distribution = track(calloc(vocab_len * sizeof(float), 1), "Failed to allocate memory to compute target distribution.");
-        float* initial_error = track(calloc(vocab_len * sizeof(float), 1), "Failed to allocate memory to compute initial error.");
-
-        predicted_probs = softmax(cache.vocab_scores, vocab_len, predicted_probs);
-
-        float epsilon_grad = 0.1;
-        for (int index = 0; index < vocab_len; index++){
-            target_distribution[index] = epsilon_grad / (vocab_len - 1); //if somehow vocab_len is 0 here i swear it is your fault
-        }
-        target_distribution[target_token.token_id] = 1.0 - epsilon_grad;
-
-        for (int index = 0; index < vocab_len; index++){
-            initial_error[index] = predicted_probs[index] - target_distribution[index];
-        }
 
         float* vocab_projection_weight_gradients = notrack(calloc(vocab_len * embeddingSize * 3 * sizeof(float), 1), "Failed to allocate memory to compute vocabulary projection weight gradients.");
         float* vocab_projection_bias_gradients = notrack(calloc(vocab_len * 3 * sizeof(float), 1), "Failed to allocate memory to compute vocabulary projection bias gradients.");
-
-        for (int index = 0; index < vocab_len; index++){
-            float error_val = initial_error[index];
-            float** final_layer_activation = cache.layers[layersAmount - 1].feed_forward.final; //[tokenized][embeddingSize]
-            float* last_token_activations = final_layer_activation[seq_len - 1];
-
-            for (int subindex = 0; subindex < embeddingSize; subindex++){
-                int weight_idx = index * embeddingSize + subindex;
-                float activation_val = last_token_activations[subindex];
-                float gradient = error_val * activation_val;
-                vocab_projection_weight_gradients[weight_idx * 3] = gradient;
-            }
-
-            vocab_projection_bias_gradients[index * 3] = error_val;
-        }
 
         float** error_gradients = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute error gradients.");
         for (int index = 0; index < seq_len; index++){
             error_gradients[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to compute error gradients.");
         }
 
-        float* last_layer_final_output_grad = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to store last layer final output gradient.");
         float* vocab_projection_weights = vocab_projection.weights;
-        
-        for (int index = 0; index < embeddingSize; index++){
-            for (int subindex = 0; subindex < vocab_len; subindex++){
-                last_layer_final_output_grad[index] += initial_error[subindex] * vocab_projection_weights[subindex * embeddingSize * 3 + index * 3];
+        float** final_layer_activation = cache.layers[layersAmount - 1].feed_forward.final; //[tokenized][embeddingSize]
+
+        for (int pos = 0; pos < seq_len; pos++){
+            float* activation = final_layer_activation[pos];
+            for (int vocab_idx = 0; vocab_idx < vocab_len; vocab_idx++){
+                float error_val = initial_error[pos][vocab_idx];
+                for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    int weight_idx = vocab_idx * embeddingSize + subindex;
+                    vocab_projection_weight_gradients[weight_idx * 3] += error_val * activation[subindex];
+                }
+                vocab_projection_bias_gradients[vocab_idx * 3] += error_val;
+            }
+
+            for (int emb = 0; emb < embeddingSize; emb++){
+                float accum = 0;
+                for (int vocab_idx = 0; vocab_idx < vocab_len; vocab_idx++){
+                    accum += initial_error[pos][vocab_idx] * vocab_projection_weights[vocab_idx * embeddingSize * 3 + emb * 3];
+                }
+                error_gradients[pos][emb] = accum;
             }
         }
-
-        error_gradients[seq_len - 1] = last_layer_final_output_grad;
 
         float** embedding_gradients = notrack(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute embedding gradients.");
         for (int index = 0; index < seq_len; index++){
@@ -4510,44 +4717,62 @@ int main(int argc, char** argv){
             rets.layer_grads[layer].weights.attention.heads = notrack(malloc(heads * sizeof(*rets.layer_grads[layer].weights.attention.heads)), "Failed to allocate memory to compute layer gradients.");
             rets.layer_grads[layer].biases.attention.heads = notrack(malloc(heads * sizeof(*rets.layer_grads[layer].biases.attention.heads)), "Failed to allocate memory to compute layer gradients.");
 
-            rets.layer_grads[layer].weights.attention.output = notrack(calloc(embeddingSize * (embeddingSize * heads) * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
+            rets.layer_grads[layer].weights.attention.output = notrack(calloc(embeddingSize * (head_dim * heads) * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
             rets.layer_grads[layer].biases.attention.output = notrack(calloc(embeddingSize * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
 
-            rets.layer_grads[layer].weights.feed_forward.grow = notrack(calloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
-            rets.layer_grads[layer].weights.feed_forward.gate = notrack(calloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
-            rets.layer_grads[layer].weights.feed_forward.shrink = notrack(calloc(embeddingSize * (embeddingSize * 4) * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
+            rets.layer_grads[layer].weights.feed_forward.grow = notrack(calloc(embeddingSize * (embeddingSize * ffnGrowSize) * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
+            rets.layer_grads[layer].weights.feed_forward.gate = notrack(calloc(embeddingSize * (embeddingSize * ffnGrowSize) * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
+            rets.layer_grads[layer].weights.feed_forward.shrink = notrack(calloc(embeddingSize * (embeddingSize * ffnGrowSize) * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
 
-            rets.layer_grads[layer].biases.feed_forward.grow = notrack(calloc((embeddingSize * 4) * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
-            rets.layer_grads[layer].biases.feed_forward.gate = notrack(calloc((embeddingSize * 4) * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
+            rets.layer_grads[layer].biases.feed_forward.grow = notrack(calloc((embeddingSize * ffnGrowSize) * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
+            rets.layer_grads[layer].biases.feed_forward.gate = notrack(calloc((embeddingSize * ffnGrowSize) * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
             rets.layer_grads[layer].biases.feed_forward.shrink = notrack(calloc(embeddingSize * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
 
             for (int head = 0; head < heads; head++){
-                rets.layer_grads[layer].weights.attention.heads[head].query = notrack(calloc(embeddingSize * embeddingSize * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
-                rets.layer_grads[layer].weights.attention.heads[head].key = notrack(calloc(embeddingSize * embeddingSize * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
-                rets.layer_grads[layer].weights.attention.heads[head].value = notrack(calloc(embeddingSize * embeddingSize * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
+                rets.layer_grads[layer].weights.attention.heads[head].query = notrack(calloc(head_dim * embeddingSize * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
+                rets.layer_grads[layer].weights.attention.heads[head].key = notrack(calloc(head_dim * embeddingSize * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
+                rets.layer_grads[layer].weights.attention.heads[head].value = notrack(calloc(head_dim * embeddingSize * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
 
-                rets.layer_grads[layer].biases.attention.heads[head].query = notrack(calloc(embeddingSize * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
-                rets.layer_grads[layer].biases.attention.heads[head].key = notrack(calloc(embeddingSize * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
-                rets.layer_grads[layer].biases.attention.heads[head].value = notrack(calloc(embeddingSize * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
+                rets.layer_grads[layer].biases.attention.heads[head].query = notrack(calloc(head_dim * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
+                rets.layer_grads[layer].biases.attention.heads[head].key = notrack(calloc(head_dim * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
+                rets.layer_grads[layer].biases.attention.heads[head].value = notrack(calloc(head_dim * 3 * sizeof(float), 1), "Failed to allocate memory to compute layer gradients.");
             }
 
+            float residual_scale = 0.70710678f;
             float* ffw_shrink_weights = layers[layer].weights.feed_forward.shrink;
-            float** grad_into_ffn_shrink = next_grad;
-            float** grad_into_ffn_residual = next_grad;
+            float** grad_into_ffn_shrink = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to scale residual gradients.");
+            float** grad_into_ffn_residual = grad_into_ffn_shrink;
+            for (int index = 0; index < seq_len; index++){
+                grad_into_ffn_shrink[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to scale residual gradients.");
+                for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    grad_into_ffn_shrink[index][subindex] = next_grad[index][subindex] * residual_scale;
+                }
+            }
 
             float** fused_grad = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute fused gradient.");
             for (int index = 0; index < seq_len; index++){
-                fused_grad[index] = track(calloc(embeddingSize * 4 * sizeof(float), 1), "Failed to allocate memory to compute fused gradient.");
+                fused_grad[index] = track(calloc(embeddingSize * ffnGrowSize * sizeof(float), 1), "Failed to allocate memory to compute fused gradient.");
                 float* gate_pre_cache = cache.layers[layer].feed_forward.after_relu[index]; //gate pre-activations
                 float* grow_cache = cache.layers[layer].feed_forward.bigger[index];
-                for (int subindex = 0; subindex < embeddingSize * 4; subindex++){
+                for (int subindex = 0; subindex < embeddingSize * ffnGrowSize; subindex++){
                     float gate_pre = gate_pre_cache[subindex];
                     float sig = sigmoid_scalar(gate_pre);
                     float gate_act = gate_pre * sig;
                     float fused_val = grow_cache[subindex] * gate_act;
+                    float mask_val = 1.0f;
+                    if (cache.layers[layer].feed_forward.ff_dropout_mask){
+                        mask_val = cache.layers[layer].feed_forward.ff_dropout_mask[index][subindex];
+                    }
                     for (int subindex_ = 0; subindex_ < embeddingSize; subindex_++){
-                        fused_grad[index][subindex] += grad_into_ffn_shrink[index][subindex_] * ffw_shrink_weights[subindex_ * (embeddingSize * 4) * 3 + subindex * 3];
-                        rets.layer_grads[layer].weights.feed_forward.shrink[subindex_ * (embeddingSize * 4) * 3 + subindex * 3] += grad_into_ffn_shrink[index][subindex_] * fused_val;
+                        fused_grad[index][subindex] += grad_into_ffn_shrink[index][subindex_] * ffw_shrink_weights[subindex_ * (embeddingSize * ffnGrowSize) * 3 + subindex * 3];
+                        rets.layer_grads[layer].weights.feed_forward.shrink[subindex_ * (embeddingSize * ffnGrowSize) * 3 + subindex * 3] += grad_into_ffn_shrink[index][subindex_] * fused_val * mask_val;
+                    }
+                }
+            }
+            if (cache.layers[layer].feed_forward.ff_dropout_mask){
+                for (int index = 0; index < seq_len; index++){
+                    for (int subindex = 0; subindex < embeddingSize * ffnGrowSize; subindex++){
+                        fused_grad[index][subindex] *= cache.layers[layer].feed_forward.ff_dropout_mask[index][subindex];
                     }
                 }
             }
@@ -4566,11 +4791,11 @@ int main(int argc, char** argv){
             float** gate_back = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute gate backprop.");
             for (int index = 0; index < seq_len; index++){
                 grow_back[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to compute grow backprop.");
-                gate_back[index] = track(calloc(embeddingSize * 4 * sizeof(float), 1), "Failed to allocate memory to compute gate backprop.");
+                gate_back[index] = track(calloc(embeddingSize * ffnGrowSize * sizeof(float), 1), "Failed to allocate memory to compute gate backprop.");
                 float* norm2_output_cache = cache.layers[layer].norm2_output[index];
                 float* gate_pre_cache = cache.layers[layer].feed_forward.after_relu[index];
                 float* grow_cache = cache.layers[layer].feed_forward.bigger[index];
-                for (int subindex = 0; subindex < embeddingSize * 4; subindex++){
+                for (int subindex = 0; subindex < embeddingSize * ffnGrowSize; subindex++){
                     float gate_pre = gate_pre_cache[subindex];
                     float sig = sigmoid_scalar(gate_pre);
                     float gate_act = gate_pre * sig;
@@ -4583,10 +4808,10 @@ int main(int argc, char** argv){
 
                     float d_grow = fused_grad_val * gate_act;
                     for (int subindex_ = 0; subindex_ < embeddingSize; subindex_++){
-                        grow_back[index][subindex_] += d_grow * ffw_grow_weights[subindex_ * (embeddingSize * 4) * 3 + subindex * 3];
-                        rets.layer_grads[layer].weights.feed_forward.grow[subindex_ * (embeddingSize * 4) * 3 + subindex * 3] += d_grow * norm2_output_cache[subindex_];
+                        grow_back[index][subindex_] += d_grow * ffw_grow_weights[subindex_ * (embeddingSize * ffnGrowSize) * 3 + subindex * 3];
+                        rets.layer_grads[layer].weights.feed_forward.grow[subindex_ * (embeddingSize * ffnGrowSize) * 3 + subindex * 3] += d_grow * norm2_output_cache[subindex_];
 
-                        rets.layer_grads[layer].weights.feed_forward.gate[subindex_ * (embeddingSize * 4) * 3 + subindex * 3] += gate_pre_grad * norm2_output_cache[subindex_];
+                        rets.layer_grads[layer].weights.feed_forward.gate[subindex_ * (embeddingSize * ffnGrowSize) * 3 + subindex * 3] += gate_pre_grad * norm2_output_cache[subindex_];
                     }
                     rets.layer_grads[layer].biases.feed_forward.grow[subindex * 3] += d_grow;
                     rets.layer_grads[layer].biases.feed_forward.gate[subindex * 3] += gate_pre_grad;
@@ -4600,9 +4825,9 @@ int main(int argc, char** argv){
                 for (int subindex = 0; subindex < embeddingSize; subindex++){
                     combined_norm2_back[index][subindex] += grow_back[index][subindex];
                 }
-                for (int subindex_ = 0; subindex_ < embeddingSize * 4; subindex_++){
+                for (int subindex_ = 0; subindex_ < embeddingSize * ffnGrowSize; subindex_++){
                     for (int subindex = 0; subindex < embeddingSize; subindex++){
-                        combined_norm2_back[index][subindex] += gate_back[index][subindex_] * ffw_gate_weights[subindex * (embeddingSize * 4) * 3 + subindex_ * 3];
+                        combined_norm2_back[index][subindex] += gate_back[index][subindex_] * ffw_gate_weights[subindex * (embeddingSize * ffnGrowSize) * 3 + subindex_ * 3];
                     }
                 }
             }
@@ -4616,13 +4841,22 @@ int main(int argc, char** argv){
             }
 
             for (int index = 0; index < seq_len; index++){
+                float mean_dxhat_xhat = 0;
                 for (int subindex = 0; subindex < embeddingSize; subindex++){
                     float x_hat_val_2 = cache.layers[layer].norm2_x_hat[index][subindex];
 
                     rets.layer_grads[layer].weights.normalize_2[subindex * 3] += norm2_output_grad[index][subindex] * x_hat_val_2;
                     rets.layer_grads[layer].biases.normalize_2[subindex * 3] += norm2_output_grad[index][subindex];
                     float gamma2_val = norm2_weights[subindex * 3];
-                    grad_into_norm2_input[index][subindex] = norm2_output_grad[index][subindex] * gamma2_val;
+                    float dxhat = norm2_output_grad[index][subindex] * gamma2_val;
+                    mean_dxhat_xhat += dxhat * x_hat_val_2;
+                }
+                mean_dxhat_xhat /= embeddingSize;
+                float inv_rms_2 = cache.layers[layer].norm2_inv_rms[index];
+                for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    float gamma2_val = norm2_weights[subindex * 3];
+                    float dxhat = norm2_output_grad[index][subindex] * gamma2_val;
+                    grad_into_norm2_input[index][subindex] = (dxhat - cache.layers[layer].norm2_x_hat[index][subindex] * mean_dxhat_xhat) * inv_rms_2;
                 }
             }
 
@@ -4634,26 +4868,41 @@ int main(int argc, char** argv){
                 }
             }
 
-            float* attention_output_weights = layers[layer].weights.attention.output;
-            float** attention_output_grad = combined_grad_before_norm2;
-            float** attention_output_input_grad = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute attention output input grad.");
-            float* concatenated_input = track(malloc(embeddingSize * heads * sizeof(float)), "Failed to allocate memory to compute concatenated input.");
+            float** scaled_combined_grad = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to scale combined gradients.");
             for (int index = 0; index < seq_len; index++){
-                memset(concatenated_input, 0, embeddingSize * heads * sizeof(float));
-                attention_output_input_grad[index] = track(calloc(embeddingSize * heads * sizeof(float), 1), "Failed to allocate memory to compute attention output input grad.");
+                scaled_combined_grad[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to scale combined gradients.");
+                for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    scaled_combined_grad[index][subindex] = combined_grad_before_norm2[index][subindex] * residual_scale;
+                }
+            }
+
+            float* attention_output_weights = layers[layer].weights.attention.output;
+            float** attention_output_grad = scaled_combined_grad;
+            if (cache.layers[layer].attn_dropout_mask){
+                for (int index = 0; index < seq_len; index++){
+                    for (int subindex = 0; subindex < embeddingSize; subindex++){
+                        attention_output_grad[index][subindex] *= cache.layers[layer].attn_dropout_mask[index][subindex];
+                    }
+                }
+            }
+            float** attention_output_input_grad = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute attention output input grad.");
+            float* concatenated_input = track(malloc(head_dim * heads * sizeof(float)), "Failed to allocate memory to compute concatenated input.");
+            for (int index = 0; index < seq_len; index++){
+                memset(concatenated_input, 0, head_dim * heads * sizeof(float));
+                attention_output_input_grad[index] = track(calloc(head_dim * heads * sizeof(float), 1), "Failed to allocate memory to compute attention output input grad.");
 
                 int current_offset = 0;
                 for (int head = 0; head < heads; head++){
-                    memcpy(concatenated_input + current_offset, cache.layers[layer].heads[head].output[index], embeddingSize * sizeof(float));
-                    current_offset += embeddingSize;
+                    memcpy(concatenated_input + current_offset, cache.layers[layer].heads[head].output[index], head_dim * sizeof(float));
+                    current_offset += head_dim;
                 }
                 
                 for (int subindex = 0; subindex < embeddingSize; subindex++){
-                    for (int subindex_ = 0; subindex_ < embeddingSize * heads; subindex_++){
-                        attention_output_input_grad[index][subindex_] += attention_output_grad[index][subindex] * attention_output_weights[(subindex * (embeddingSize * heads) + subindex_) * 3];
+                    for (int subindex_ = 0; subindex_ < head_dim * heads; subindex_++){
+                        attention_output_input_grad[index][subindex_] += attention_output_grad[index][subindex] * attention_output_weights[(subindex * (head_dim * heads) + subindex_) * 3];
                         
                         float weight_grad_delta = attention_output_grad[index][subindex] * concatenated_input[subindex_];
-                        rets.layer_grads[layer].weights.attention.output[(subindex * (embeddingSize * heads) + subindex_) * 3] += weight_grad_delta;
+                        rets.layer_grads[layer].weights.attention.output[(subindex * (head_dim * heads) + subindex_) * 3] += weight_grad_delta;
                     }
                     rets.layer_grads[layer].biases.attention.output[subindex * 3] += attention_output_grad[index][subindex];
                 }
@@ -4667,20 +4916,20 @@ int main(int argc, char** argv){
             float** attention_prob_grad = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute attention probability gradient.");
             float** attention_score_grad = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute attention score gradient.");
             for (int index = 0; index < seq_len; index++){
-                head_grad_from_output[index] = track(malloc(embeddingSize * sizeof(float)), "Failed to allocate memory to compute head gradient from output.");
-                v_grad[index] = track(malloc(embeddingSize * sizeof(float)), "Failed to allocate memory to compute v gradient.");
-                q_grad[index] = track(malloc(embeddingSize * sizeof(float)), "Failed to allocate memory to compute q gradient.");
-                k_grad[index] = track(malloc(embeddingSize * sizeof(float)), "Failed to allocate memory to compute k gradient.");
+                head_grad_from_output[index] = track(malloc(head_dim * sizeof(float)), "Failed to allocate memory to compute head gradient from output.");
+                v_grad[index] = track(malloc(head_dim * sizeof(float)), "Failed to allocate memory to compute v gradient.");
+                q_grad[index] = track(malloc(head_dim * sizeof(float)), "Failed to allocate memory to compute q gradient.");
+                k_grad[index] = track(malloc(head_dim * sizeof(float)), "Failed to allocate memory to compute k gradient.");
                 attention_prob_grad[index] = track(malloc(seq_len * sizeof(float)), "Failed to allocate memory to compute attention probability gradient.");
                 attention_score_grad[index] = track(malloc(seq_len * sizeof(float)), "Failed to allocate memory to compute attention score gradient.");
             }
 
             for (int head = 0; head < heads; head++){
                 for (int index = 0; index < seq_len; index++){
-                    memset(head_grad_from_output[index], 0, embeddingSize * sizeof(float));
-                    memset(v_grad[index], 0, embeddingSize * sizeof(float));
-                    memset(q_grad[index], 0, embeddingSize * sizeof(float));
-                    memset(k_grad[index], 0, embeddingSize * sizeof(float));
+                    memset(head_grad_from_output[index], 0, head_dim * sizeof(float));
+                    memset(v_grad[index], 0, head_dim * sizeof(float));
+                    memset(q_grad[index], 0, head_dim * sizeof(float));
+                    memset(k_grad[index], 0, head_dim * sizeof(float));
                     memset(attention_prob_grad[index], 0, seq_len * sizeof(float));
                     memset(attention_score_grad[index], 0, seq_len * sizeof(float));
                 }
@@ -4689,7 +4938,7 @@ int main(int argc, char** argv){
                     head_input_grads[head][index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory to compute head input gradients.");
                 }
                 for (int index = 0; index < seq_len; index++) {
-                    memcpy(head_grad_from_output[index], attention_output_input_grad[index] + head * embeddingSize, embeddingSize * sizeof(float));
+                    memcpy(head_grad_from_output[index], attention_output_input_grad[index] + head * head_dim, head_dim * sizeof(float));
                 }
 
                 float* query_weights = layers[layer].weights.attention.heads[head].query;
@@ -4698,7 +4947,7 @@ int main(int argc, char** argv){
 
                 float** norm1_output_cache = cache.layers[layer].normalized;
                 for (int index = 0; index < seq_len; index++){
-                    for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    for (int subindex = 0; subindex < head_dim; subindex++){
                         for (int subindex_ = 0; subindex_ < seq_len; subindex_++){
                             v_grad[subindex_][subindex] += head_grad_from_output[index][subindex] * cache.layers[layer].heads[head].attention_probs[index][subindex_];
                             attention_prob_grad[index][subindex_] += head_grad_from_output[index][subindex] * cache.layers[layer].heads[head].v_vectors[subindex_][subindex];
@@ -4717,7 +4966,7 @@ int main(int argc, char** argv){
                     for (int subindex = 0; subindex < seq_len; subindex++){
                         if (subindex <= index){
                             float score_grad = attention_score_grad[index][subindex] / scale;
-                            for (int subindex_ = 0; subindex_ < embeddingSize; subindex_++){
+                            for (int subindex_ = 0; subindex_ < head_dim; subindex_++){
                                 q_grad[index][subindex_] += score_grad * cache.layers[layer].heads[head].k_vectors[subindex][subindex_];
                                 k_grad[subindex][subindex_] += score_grad * cache.layers[layer].heads[head].q_vectors[index][subindex_];
                             }
@@ -4725,7 +4974,7 @@ int main(int argc, char** argv){
                     }
 
                     float* normalized_input_embedding = norm1_output_cache[index];
-                    for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    for (int subindex = 0; subindex < head_dim; subindex++){
                         for (int subindex_ = 0; subindex_ < embeddingSize; subindex_++){
                             rets.layer_grads[layer].weights.attention.heads[head].query[subindex * embeddingSize * 3 + subindex_ * 3] += q_grad[index][subindex] * normalized_input_embedding[subindex_];
                             rets.layer_grads[layer].weights.attention.heads[head].key[subindex * embeddingSize * 3 + subindex_ * 3] += k_grad[index][subindex] * normalized_input_embedding[subindex_];
@@ -4734,9 +4983,11 @@ int main(int argc, char** argv){
                         rets.layer_grads[layer].biases.attention.heads[head].query[subindex * 3] += q_grad[index][subindex];
                         rets.layer_grads[layer].biases.attention.heads[head].key[subindex * 3] += k_grad[index][subindex];
                         rets.layer_grads[layer].biases.attention.heads[head].value[subindex * 3] += v_grad[index][subindex];
+                    }
 
+                    for (int subindex = 0; subindex < embeddingSize; subindex++){
                         float grad_sum_k = 0;
-                        for (int subindex_ = 0; subindex_ < embeddingSize; subindex_++){
+                        for (int subindex_ = 0; subindex_ < head_dim; subindex_++){
                             grad_sum_k += q_grad[index][subindex_] * query_weights[subindex_ * embeddingSize * 3 + subindex * 3];
                             grad_sum_k += k_grad[index][subindex_] * key_weights[subindex_ * embeddingSize * 3 + subindex * 3];
                             grad_sum_k += v_grad[index][subindex_] * value_weights[subindex_ * embeddingSize * 3 + subindex * 3];
@@ -4768,9 +5019,18 @@ int main(int argc, char** argv){
                     rets.layer_grads[layer].weights.normalize_1[subindex * 3] += norm1_output_grad[index][subindex] * x_hat_val_1;
                     rets.layer_grads[layer].biases.normalize_1[subindex * 3] += norm1_output_grad[index][subindex];
                     float gamma1_val = normalize_1_weights[subindex * 3];
-                    grad_into_norm1_input[index][subindex] = norm1_output_grad[index][subindex] * gamma1_val;
-
-                    grad_into_previous_layer_output[index][subindex] = grad_into_norm1_input[index][subindex] + combined_grad_before_norm2[index][subindex];
+                    float dxhat = norm1_output_grad[index][subindex] * gamma1_val;
+                    grad_into_norm1_input[index][subindex] = dxhat;
+                }
+                float mean_dxhat_xhat = 0;
+                for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    mean_dxhat_xhat += grad_into_norm1_input[index][subindex] * cache.layers[layer].norm1_x_hat[index][subindex];
+                }
+                mean_dxhat_xhat /= embeddingSize;
+                float inv_rms_1 = cache.layers[layer].norm1_inv_rms[index];
+                for (int subindex = 0; subindex < embeddingSize; subindex++){
+                    grad_into_norm1_input[index][subindex] = (grad_into_norm1_input[index][subindex] - cache.layers[layer].norm1_x_hat[index][subindex] * mean_dxhat_xhat) * inv_rms_1;
+                    grad_into_previous_layer_output[index][subindex] = grad_into_norm1_input[index][subindex] + scaled_combined_grad[index][subindex];
                 }
             }
 
@@ -4785,32 +5045,219 @@ int main(int argc, char** argv){
             }
         }
 
+        rets.embedding_grads = embedding_gradients;
+        rets.vocab_projection.weights = vocab_projection_weight_gradients;
+        rets.vocab_projection.biases = vocab_projection_bias_gradients;
         printf("Computed gradients in %lldms.\n", timer_end(timer_));
         free_cache_object(cache);
         cleanup();
         return rets;
     }
 
-    printf("Input strings to run inference on:\n");
-    printf("(Type 'exit' to exit or 'save' to save)\n");
+    typedef struct {
+        char* context;
+        train_step_token target_token;
+    } threadData;
+
+    THREAD_RETURN THREAD_CALL workerThread(void* arg){
+        threadData* data = arg;
+
+        train_step_ret* rets = malloc(sizeof(train_step_ret));
+        if (!rets){
+            printf("Failed to allocate memory to setup worker thread.\n");
+            exit(1);
+        }
+
+        train_step_ret stack_ret = train_step(data->context, data->target_token);
+
+        memcpy(rets, &stack_ret, sizeof(train_step_ret));
+
+        return rets;
+    }
+
+    // train_step_ret* workerThread_train_step(char* context, train_step_token target_token){
+    //     threadData data = {0};
+    //
+    //     data.context = context;
+    //     data.target_token = target_token;
+    //
+    //     Thread thread;
+    //
+    //     thread_start(workerThread, &data, thread);
+    //
+    //     train_step_ret* rets = 0;
+    //     thread_join(thread, &rets);
+    //
+    //     return rets;
+    // }
+
+    float train(int epochAmount){
+        long long train_timer = timer();
+        printf("Starting training...\n");
+        
+        long long token_count_timer = timer();
+        printf("Counting amount of tokens in dataset files...\n");
+        printf("Processing %d dataset files...", training_dataset_paths_len);
+    }
+
+    if (load && (!do_pretrain) && (!do_train)){
+        printf("\n-----------------------------------------------------\n");
+        printf("Chat with the model (inference, default temp is 0.7):\n");
+        float temp = 0.7;
+        printf("(Type '/exit' to exit, '/save <filename>' to save the model or '/temperature <new_temperature> to change the temperature)\n");
+        char* context = malloc(strlen("<|bos|>") + 1);
+        if (!context){
+            printf("Failed to allocate memory to setup model chat interface.\n");
+            return 1;
+        }
+        strcpy(context, "<|bos|>");
+        size_t context_len = strlen("<|bos|>");
+        while (true){
+            printf("\nYou:\n");
+            char* input_to_inference = input("› ");
+            if (!input_to_inference){
+                printf("Failed to read user input.\n");
+                return 1;
+            }
+
+            size_t input_to_inference_len = strlen(input_to_inference);
+            if (strcmp(input_to_inference, "/exit") == 0){
+                return 0;
+            }
+            else{
+                if (input_to_inference_len >= strlen("/save x")){
+                    char charaftersave = input_to_inference[strlen("/save ")];
+                    input_to_inference[strlen("/save ")] = '\0';
+                    if (strcmp(input_to_inference, "/save ") == 0){
+                        input_to_inference[strlen("/save ")] = charaftersave;
+                        char* newptr = input_to_inference + strlen("/save ");
+                        save(newptr);
+                        printf("Saved model as '%s'\n", newptr);
+                        free(input_to_inference);
+                        continue;
+                    }
+                    else{
+                        if (input_to_inference_len >= strlen("/temperature x")){
+                            input_to_inference[strlen("/save ")] = charaftersave;
+                            charaftersave = input_to_inference[strlen("/temperature ")];
+                            input_to_inference[strlen("/temperature ")] = '\0';
+                            if (strcmp(input_to_inference, "/temperature ") == 0){
+                                input_to_inference[strlen("/temperature ")] = charaftersave;
+                                char* newptr = input_to_inference + strlen("/temperature ");
+                                float ntemp = (float)(atof(newptr));
+                                if (ntemp < 0){
+                                    printf("Invalid temperature, must be float >=0.\n");
+                                    free(input_to_inference);
+                                    continue;
+                                }
+                                temp = ntemp;
+                                printf("Temperature now set to %f.\n", temp);
+                                free(input_to_inference);
+                                continue;
+                            }
+                            else{
+                                input_to_inference[strlen("/temperature ")] = charaftersave;
+                                goto generate_turn;
+                            }
+                        }
+                        else{
+                            input_to_inference[strlen("/save ")] = charaftersave;
+                            if (strcmp(input_to_inference, "/temperature") == 0){
+                                printf("You need to provide a new temperature with /temperature.\n");
+                                printf("Usage: /temperature <new_temperature>\n");
+                                printf("(With <new_temperature> being a float >=0)\n");
+                                free(input_to_inference);
+                                continue;
+                            }
+                            else{
+                                goto generate_turn;
+                            }
+                        }
+                    }
+                }
+                else{
+                    if (strcmp(input_to_inference, "/save") == 0){
+                        printf("You need to provide a filename with /save.\n");
+                        printf("Usage: /save <filename>\n");
+                        printf("(With <filename> being any valid filename)\n");
+                        free(input_to_inference);
+                        continue;
+                    }
+                    else{
+                        goto generate_turn;
+                    }
+                }
+            }
+
+        generate_turn:
+            context = realloc(context, context_len + input_to_inference_len + strlen("\n\nPerson:\n\nYou:\n") + 1);
+            if (!context){
+                printf("Failed to allocate memory to track chat context.\n");
+                return 1;
+            }
+            context_len += input_to_inference_len + strlen("\n\nPerson:\n\nYou:\n");
+            strcat(context, "\n\nPerson:\n");
+            strcat(context, input_to_inference);
+            strcat(context, "\nYou:\n");
+
+            printf("Model:\n");
+            size_t token_n = 0;
+            while (true){
+                if (token_n > maxOutputSize){
+                    printf("[Reached max output size]\n");
+                    break;
+                }
+                if (token_n > contextSize){
+                    printf("[Context full]\n");
+                    break;
+                }
+                infret rets = inference(context, false, temp, false);
+                if (!rets.success){
+                    printf("[Inference failure]\n");
+                    break;
+                }
+                token_n++;
+                int predicted_token_id = rets.predicted_token_id;
+                char* predicted_token = id_to_token(predicted_token_id);
+                printf("%s", predicted_token);
+
+                context_len += strlen(predicted_token);
+                context = realloc(context, context_len + 1);
+                if (!context){
+                    printf("Failed to allocate memory to track chat context.\n");
+                    return 1;
+                }
+                strcat(context, predicted_token);
+            }
+            free(input_to_inference);
+        }
+    }
+
+    printf("--\n");
+    printf("This is coming soon, you can already checkout the inference interface in --load mode (without --train or --pretrain flags) as long as you have a model file which just answer 'y' to the following prompt to create a random one:\n");
+
     while (true){
-        char* input_to_inference = input("› ");
-        if (strcmp(input_to_inference, "exit") == 0){
+        char* create_random_model = input("Create random model? (y/n) › ");
+        if (!create_random_model){
+            printf("Failed to read user input.\n");
+            return 1;
+        }
+        if (strcmp(create_random_model, "y") == 0){
+            create_random_model = input("Filename to save as: ");
+            save(create_random_model);
             return 0;
         }
         else{
-            if (strcmp(input_to_inference, "save") == 0){
-                save("model.zip");
-                printf("Saved model as model.zip\n");
-                free(input_to_inference);
+            if (strcmp(create_random_model, "n") == 0){
+                printf("Exiting...\n");
+                return 0;
+            }
+            else{
+                printf("Invalid input, valid input is 'y' for yes or 'n' for no.\n");
+                free(create_random_model);
                 continue;
             }
         }
-        infret rets = inference(input_to_inference, false, 0);
-        int predicted_token_id = rets.predicted_token_id;
-        char* predicted_token = id_to_token(predicted_token_id);
-        printf("Predicted token id %d: %s\n", predicted_token_id, predicted_token);
-        free(input_to_inference);
     }
 
     //NOTE: Old demos
