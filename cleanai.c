@@ -173,6 +173,17 @@ int itoa(int value, char* buff, int base){
     return sprintf(buff, "%d", value);
 }
 
+void sleep_ms(unsigned int ms) {
+#ifdef _WIN32
+    Sleep(ms);
+#else
+    struct timespec ts;
+    ts.tv_sec  = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000;
+    nanosleep(&ts, NULL);
+#endif
+}
+
 char* input(char* qry){
     printf("%s", qry);
     fflush(stdout);
@@ -662,16 +673,11 @@ int main(int argc, char** argv){
         }
     }
 
-    if (!(load && (!do_train) && (!do_pretrain))){
-        if (!file_exists(config_location)){
-            printf("Failed to open config file. Most likely causes are that it doesn't exist or that you don't have the required permissions to read it.\n");
-            return 1;
-        }
-    }
-    else{
-        if (config_location){
-            if (!(strcmp(config_location, "") == 0)){
-                printf("[Config] [Info] Ignoring config because you are loading a model and not (pre-)training therefore a config is not required.\n");
+    if (config_location){
+        if (strlen(config_location) > 0){
+            if (!file_exists(config_location)){
+                printf("Failed to open config file. Most likely causes are that it doesn't exist or that you don't have the required permissions to read it.\n");
+                return 1;
             }
         }
     }
@@ -688,6 +694,11 @@ int main(int argc, char** argv){
     int contextSize = -1;
     int maxOutputSize = -1;
     if (load && (!do_pretrain) && (!do_train)){
+        if (config_location){
+            if (strlen(config_location) > 0){
+                goto parse_config;
+            }
+        }
         printf("Since you are loading a model and not (pre-)training it, a config is optional and you did not provide one, a context size and max output size are required to use the model.\n");
         while (contextSize < 1){
             char* contextSizeInput = input("Please enter context size for the model (>1): ");
@@ -720,6 +731,7 @@ int main(int argc, char** argv){
         goto after_config_parse;
     }
 
+parse_config:
     printf("Reading config file...\n");
     char* config_file = read_file(config_location);
     if (!config_file){
@@ -5201,9 +5213,10 @@ after_config_parse:
             strcat(context, "\nYou:\n");
 
             printf("Model:\n");
+            long long generate_timer = timer();
             size_t token_n = 0;
             while (true){
-                if (token_n > maxOutputSize){
+                if (token_n + 1 > maxOutputSize){
                     printf("[Reached max output size]\n");
                     break;
                 }
@@ -5219,7 +5232,9 @@ after_config_parse:
                 token_n++;
                 int predicted_token_id = rets.predicted_token_id;
                 char* predicted_token = id_to_token(predicted_token_id);
+
                 printf("%s", predicted_token);
+                fflush(stdout);
 
                 context_len += strlen(predicted_token);
                 context = realloc(context, context_len + 1);
@@ -5229,7 +5244,13 @@ after_config_parse:
                 }
                 strcat(context, predicted_token);
             }
+            long long timerresult = timer_end(generate_timer);
             free(input_to_inference);
+            float tok_per_s = 0;
+            if (timerresult > 0){
+                tok_per_s = 1000 * (float)(token_n) / (float)(timerresult);
+            }
+            printf("(Generated in %lldms, %d tokens, %.2f tok/sec avr.)\n", timerresult, token_n, tok_per_s);
         }
     }
 
