@@ -3784,7 +3784,7 @@ after_opt_select:
         free(cache_object.layers);
     }
 
-    infret inference(char* context, bool return_cache, float temperature, bool verbose){
+    infret inference(int* tokens, size_t seq_len, bool return_cache, float temperature, bool verbose){
         void verbprintf(const char *format, ...) {
             if (!verbose) {
                 return;
@@ -3902,9 +3902,9 @@ after_opt_select:
 
         verbprintf("Doing inference...\n");
         long long timer_ = timer();
-        
+
         infret rets = {0}; //zero every field
-        
+
         rets.success = true; //failure will set it to false, its a sucess otherwise.
         if (head_dim < 1){
             printf("Head dimension is not initalized.\n");
@@ -3913,27 +3913,29 @@ after_opt_select:
             return rets;
         }
 
-        long long subtimer = timer();
-        verbprintf("Tokenizing input context...\n");
-        tokenize_ret tokenized_rets = tokenize(context);
-        if (!tokenized_rets.success){
-            printf("Failed to tokenize input context in %lldms.\n", timer_end(subtimer));
-            exit(1);
+        // Copy tokens to cache if needed, otherwise use directly
+        int* tokenized = NULL;
+        if (return_cache){
+            tokenized = malloc(seq_len * sizeof(int));
+            if (!tokenized){
+                printf("Failed to allocate memory to copy tokens for cache.\n");
+                rets.success = false;
+                cleanup();
+                return rets;
+            }
+            memcpy(tokenized, tokens, seq_len * sizeof(int));
+        } else {
+            tokenized = (int*)tokens; // Just use the pointer directly
         }
-        int* tokenized = tokenized_rets.tokens;
-        if (!return_cache){
-            track(tokenized, "");
-        }
-        verbprintf("Tokenized input context in %lldms.\n", timer_end(subtimer));
-        size_t seq_len = tokenized_rets.seq_len;
+
         if (seq_len > contextSize){
             printf("Provided context is larger than context size, cannot proceed.\n");
             rets.success = false;
             cleanup();
             return rets;
         }
-        
-        subtimer = timer();
+
+        long long subtimer = timer();
         verbprintf("Computing rotary tables...\n");
         float** rope_cos = NULL;
         float** rope_sin = NULL;
@@ -4783,7 +4785,7 @@ after_opt_select:
         free(ret.vocab_projection.biases.v);
     }
 
-    train_step_ret train_step(char* context, train_step_token target_token){
+    train_step_ret train_step(int* tokens, size_t tokens_len, train_step_token target_token){
         //I will be computing this once and only once for this function
         float scale = sqrtf(head_dim);
 
@@ -4912,7 +4914,7 @@ after_opt_select:
         
         long long inference_cache_timer = timer();
         printf("Running inference to get cache.\n");
-        infret inference_result = inference(context, true, 0, true);
+        infret inference_result = inference(tokens, tokens_len, true, 0, true);
         if (!inference_result.success){
             printf("Failed to get inference cache in %lldms.\n", timer_end(inference_cache_timer));
             printf("Failed train step in %lldms.\n", timer_end(timer_));
@@ -5368,7 +5370,8 @@ after_opt_select:
     }
 
     typedef struct {
-        char* context;
+        int* tokens;
+        size_t tokens_len;
         train_step_token target_token;
     } threadData;
 
@@ -5383,40 +5386,25 @@ after_opt_select:
             exit(1);
         }
 
-        train_step_ret stack_ret = train_step(data.context, data.target_token);
+        train_step_ret stack_ret = train_step(data.tokens, data.tokens_len, data.target_token);
 
         memcpy(rets, &stack_ret, sizeof(train_step_ret));
-        
-        free(data.context);  // ← Add this line
+
+        free(data.tokens);
 
         return rets;
     }
 
-    // train_step_ret* workerThread_train_step(char* context, train_step_token target_token){
-    //     threadData data = {0};
-    //
-    //     data.context = context;
-    //     data.target_token = target_token;
-    //
-    //     Thread thread;
-    //
-    //     thread_start(workerThread, &data, thread);
-    //
-    //     train_step_ret* rets = 0;
-    //     thread_join(thread, &rets);
-    //
-    //     return rets;
-    // }
-
     typedef struct {
-        char* context;
+        int* tokens;
+        size_t tokens_len;
         train_step_token target;
     } worker_task;
 
     worker_task* worker_tasklist = NULL;
     int worker_tasklist_len = 0;
 
-    void add_to_worker_tasklist(char* context, train_step_token target){
+    void add_to_worker_tasklist(int* tokens, size_t tokens_len, train_step_token target){
         worker_tasklist_len++;
         worker_tasklist = realloc(worker_tasklist, worker_tasklist_len * sizeof(worker_task));
         if (!worker_tasklist){
@@ -5424,7 +5412,8 @@ after_opt_select:
             exit(1);
         }
         worker_tasklist[worker_tasklist_len - 1].target = target;
-        worker_tasklist[worker_tasklist_len - 1].context = context;
+        worker_tasklist[worker_tasklist_len - 1].tokens = tokens;
+        worker_tasklist[worker_tasklist_len - 1].tokens_len = tokens_len;
         return;
     }
 
@@ -5655,7 +5644,8 @@ after_opt_select:
                     exit(1);
                 }
 
-                data->context = worker_tasklist[index].context;
+                data->tokens = worker_tasklist[index].tokens;
+                data->tokens_len = worker_tasklist[index].tokens_len;
                 data->target_token = worker_tasklist[index].target;
 
                 Thread thread;
@@ -5724,6 +5714,10 @@ after_opt_select:
     void handle_sigint(int sig) {
         if ((time_ms() - last_ctrl_c > 300) && (got_sigint == 1)){
             got_sigint = 0;
+            if (time_ms() - last_ctrl_c < 1000){
+                write(STDOUT_FILENO, "\nFaster 🫩\n", strlen("\nFaster 🫩\n"));
+                return;
+            }
             write(STDOUT_FILENO, "\n(Press ctrl + c again to exit)\n", strlen("\n(Press ctrl + c again to exit)\n"));
             return;
         }
@@ -5753,7 +5747,7 @@ after_opt_select:
             float best_loss = loss_history[0];
             int start = (loss_history_len > 5) ? loss_history_len - 5 : 0;
             printf("Loss history (last 5): ");
-            
+
             for (int i = 0; i < loss_history_len; i++){
                 if (loss_history[i] < best_loss){
                     best_loss = loss_history[i];
@@ -5764,24 +5758,85 @@ after_opt_select:
             }
             printf("\nBest loss: %.6f\n", best_loss);
         }
+        printf("Default temp to test the model is 0\n");
         printf("Commands:\n");
         printf("  /continue                  -- Continue training.\n");
         printf("  /stop                      -- Stop training.\n");
         printf("  /save <filename>           -- Save model checkpoint.\n");
         printf("  /temperature [temperature] -- Display/set current temperature.\n");
         printf("  /learningRate [lr]         -- Display/set current learning rate.\n");
+        printf("  /batchSize [size]          -- Display/set current batch size.\n");
+        printf("  /reset_context             -- Reset conversation context.\n");
         printf("\n");
+        printf("Do you want to enable multiline inputs? This will allow you to send messages multiple lines long, however as enter will be used to create a new line, you will have to use ctrl + d twice to send your message/command instead of just pressing enter.\n");
+        char* multilineornot = NULL;
+        bool use_multiline = false;
+        while (true){
+            multilineornot = input("Enable multiline inputs? (y/n) ");
+            if (!multilineornot){
+                printf("Failed to read user input.\n");
+                return false;
+            }
+
+            if (strcmp(multilineornot, "y") == 0){
+                printf("Enabled multiline inputs.\n");
+                printf("\n");
+                free(multilineornot);
+                multilineornot = NULL;
+                use_multiline = true;
+                break;
+            }
+            else{
+                if (strcmp(multilineornot, "n") == 0){
+                    printf("Disabled multiline inputs.\n");
+                    printf("\n");
+                    free(multilineornot);
+                    multilineornot = NULL;
+                    use_multiline = false;
+                    break;
+                }
+                else{
+                    printf("Invalid input, type 'y' for yes or 'n' for no.\n");
+                    free(multilineornot);
+                    multilineornot = NULL;
+                    continue;
+                }
+            }
+        }
 
         float temp = 0.0f;
-        bool use_multiline = false;
-        
-        char* context = malloc(strlen("<|bos|>\nSystem: ") + 1);
-        if (!context){
-            printf("Failed to allocate memory to setup checkpoint CLI.\n");
+
+        // Precompute template tokens
+        tokenize_ret bos_system_tok = tokenize("<|bos|>\nSystem: ");
+        if (!bos_system_tok.success){
+            printf("Failed to tokenize bos_system template.\n");
             return false;
         }
-        strcpy(context, "<|bos|>\nSystem: ");
-        size_t context_len = strlen("<|bos|>\nSystem: ");
+        tokenize_ret person_tok = tokenize("\n\nPerson:\n");
+        if (!person_tok.success){
+            printf("Failed to tokenize person template.\n");
+            free_tokenize_ret(bos_system_tok);
+            return false;
+        }
+        tokenize_ret you_tok = tokenize("\nYou:\n");
+        if (!you_tok.success){
+            printf("Failed to tokenize you template.\n");
+            free_tokenize_ret(bos_system_tok);
+            free_tokenize_ret(person_tok);
+            return false;
+        }
+
+        // Initialize context with bos_system tokens
+        int* context_tokens = malloc(bos_system_tok.seq_len * sizeof(int));
+        if (!context_tokens){
+            printf("Failed to allocate memory to setup checkpoint CLI.\n");
+            free_tokenize_ret(bos_system_tok);
+            free_tokenize_ret(person_tok);
+            free_tokenize_ret(you_tok);
+            return false;
+        }
+        memcpy(context_tokens, bos_system_tok.tokens, bos_system_tok.seq_len * sizeof(int));
+        size_t context_tokens_len = bos_system_tok.seq_len;
         
         while (true){
             printf("\nYou:\n");
@@ -5794,13 +5849,35 @@ after_opt_select:
             size_t input_to_inference_len = strlen(input_to_inference);
             if (strcmp(input_to_inference, "/continue") == 0){
                 free(input_to_inference);
-                free(context);
+                free(context_tokens);
+                free_tokenize_ret(bos_system_tok);
+                free_tokenize_ret(person_tok);
+                free_tokenize_ret(you_tok);
                 return false;
             }
             else if (strcmp(input_to_inference, "/stop") == 0){
                 free(input_to_inference);
-                free(context);
+                free(context_tokens);
+                free_tokenize_ret(bos_system_tok);
+                free_tokenize_ret(person_tok);
+                free_tokenize_ret(you_tok);
                 return true;
+            }
+            else if (strcmp(input_to_inference, "/reset_context") == 0){
+                free(input_to_inference);
+                free(context_tokens);
+                context_tokens = malloc(bos_system_tok.seq_len * sizeof(int));
+                if (!context_tokens){
+                    printf("Failed to allocate memory to reset context.\n");
+                    free_tokenize_ret(bos_system_tok);
+                    free_tokenize_ret(person_tok);
+                    free_tokenize_ret(you_tok);
+                    return false;
+                }
+                memcpy(context_tokens, bos_system_tok.tokens, bos_system_tok.seq_len * sizeof(int));
+                context_tokens_len = bos_system_tok.seq_len;
+                printf("Context has been reset.\n");
+                continue;
             }
             else{
                 if (input_to_inference_len >= strlen("/save x")){
@@ -5815,8 +5892,8 @@ after_opt_select:
                         continue;
                     }
                     else{
+                        input_to_inference[strlen("/save ")] = charaftersave;
                         if (input_to_inference_len >= strlen("/temperature x")){
-                            input_to_inference[strlen("/save ")] = charaftersave;
                             charaftersave = input_to_inference[strlen("/temperature ")];
                             input_to_inference[strlen("/temperature ")] = '\0';
                             if (strcmp(input_to_inference, "/temperature ") == 0){
@@ -5835,11 +5912,9 @@ after_opt_select:
                             }
                             else{
                                 input_to_inference[strlen("/temperature ")] = charaftersave;
-                                goto checkpoint_generate_turn;
                             }
                         }
-                        else if (input_to_inference_len >= strlen("/learningRate x")){
-                            input_to_inference[strlen("/save ")] = charaftersave;
+                        if (input_to_inference_len >= strlen("/learningRate x")){
                             charaftersave = input_to_inference[strlen("/learningRate ")];
                             input_to_inference[strlen("/learningRate ")] = '\0';
                             if (strcmp(input_to_inference, "/learningRate ") == 0){
@@ -5858,28 +5933,52 @@ after_opt_select:
                             }
                             else{
                                 input_to_inference[strlen("/learningRate ")] = charaftersave;
-                                goto checkpoint_generate_turn;
                             }
                         }
-                        else{
-                            input_to_inference[strlen("/save ")] = charaftersave;
-                            if (strcmp(input_to_inference, "/temperature") == 0){
-                                printf("Current temperature: %.2f\n", temp);
-                                printf("You can also specify a new temperature like this:\n");
-                                printf("  /temperature <new_temperature>\n");
-                                free(input_to_inference);
-                                continue;
-                            }
-                            else if (strcmp(input_to_inference, "/learningRate") == 0){
-                                printf("Current learning rate: %f\n", learningRate);
-                                printf("You can also specify a new learning rate like this:\n");
-                                printf("  /learningRate <new_learning_rate>\n");
+                        if (input_to_inference_len >= strlen("/batchSize x")){
+                            charaftersave = input_to_inference[strlen("/batchSize ")];
+                            input_to_inference[strlen("/batchSize ")] = '\0';
+                            if (strcmp(input_to_inference, "/batchSize ") == 0){
+                                input_to_inference[strlen("/batchSize ")] = charaftersave;
+                                char* newptr = input_to_inference + strlen("/batchSize ");
+                                int nbs = atoi(newptr);
+                                if (nbs <= 0){
+                                    printf("Invalid batch size, must be > 0.\n");
+                                    free(input_to_inference);
+                                    continue;
+                                }
+                                batchSize = nbs;
+                                printf("Batch size now set to %d.\n", batchSize);
                                 free(input_to_inference);
                                 continue;
                             }
                             else{
-                                goto checkpoint_generate_turn;
+                                input_to_inference[strlen("/batchSize ")] = charaftersave;
                             }
+                        }
+                        if (strcmp(input_to_inference, "/temperature") == 0){
+                            printf("Current temperature: %.2f\n", temp);
+                            printf("You can also specify a new temperature like this:\n");
+                            printf("  /temperature <new_temperature>\n");
+                            free(input_to_inference);
+                            continue;
+                        }
+                        else if (strcmp(input_to_inference, "/learningRate") == 0){
+                            printf("Current learning rate: %f\n", learningRate);
+                            printf("You can also specify a new learning rate like this:\n");
+                            printf("  /learningRate <new_learning_rate>\n");
+                            free(input_to_inference);
+                            continue;
+                        }
+                        else if (strcmp(input_to_inference, "/batchSize") == 0){
+                            printf("Current batch size: %d\n", batchSize);
+                            printf("You can also specify a new batch size like this:\n");
+                            printf("  /batchSize <new_batch_size>\n");
+                            free(input_to_inference);
+                            continue;
+                        }
+                        else{
+                            goto checkpoint_generate_turn;
                         }
                     }
                 }
@@ -5905,6 +6004,13 @@ after_opt_select:
                         free(input_to_inference);
                         continue;
                     }
+                    else if (strcmp(input_to_inference, "/batchSize") == 0){
+                        printf("Current batch size: %d\n", batchSize);
+                        printf("You can also specify a new batch size like this:\n");
+                        printf("  /batchSize <new_batch_size>\n");
+                        free(input_to_inference);
+                        continue;
+                    }
                     else{
                         goto checkpoint_generate_turn;
                     }
@@ -5912,15 +6018,29 @@ after_opt_select:
             }
 
         checkpoint_generate_turn:
-            context = realloc(context, context_len + input_to_inference_len + strlen("\n\nPerson:\n\nYou:\n") + 1);
-            if (!context){
+            // Tokenize user input
+            tokenize_ret input_tok = tokenize(input_to_inference);
+            if (!input_tok.success){
+                printf("Failed to tokenize user input.\n");
+                free(input_to_inference);
+                continue;
+            }
+
+            // Append person_tok + input_tok + you_tok to context
+            size_t new_len = context_tokens_len + person_tok.seq_len + input_tok.seq_len + you_tok.seq_len;
+            context_tokens = realloc(context_tokens, new_len * sizeof(int));
+            if (!context_tokens){
                 printf("Failed to allocate memory to track chat context.\n");
+                free_tokenize_ret(input_tok);
                 return false;
             }
-            context_len += input_to_inference_len + strlen("\n\nPerson:\n\nYou:\n");
-            strcat(context, "\n\nPerson:\n");
-            strcat(context, input_to_inference);
-            strcat(context, "\nYou:\n");
+            memcpy(context_tokens + context_tokens_len, person_tok.tokens, person_tok.seq_len * sizeof(int));
+            context_tokens_len += person_tok.seq_len;
+            memcpy(context_tokens + context_tokens_len, input_tok.tokens, input_tok.seq_len * sizeof(int));
+            context_tokens_len += input_tok.seq_len;
+            memcpy(context_tokens + context_tokens_len, you_tok.tokens, you_tok.seq_len * sizeof(int));
+            context_tokens_len += you_tok.seq_len;
+            free_tokenize_ret(input_tok);
 
             printf("Model:\n");
             long long generate_timer = timer();
@@ -5930,11 +6050,11 @@ after_opt_select:
                     printf("[Reached max output size]\n");
                     break;
                 }
-                if (token_n > contextSize){
+                if (context_tokens_len >= contextSize){
                     printf("[Context full]\n");
                     break;
                 }
-                infret rets = inference(context, false, temp, false);
+                infret rets = inference(context_tokens, context_tokens_len, false, temp, false);
                 if (!rets.success){
                     printf("[Inference failure]\n");
                     break;
@@ -5950,15 +6070,16 @@ after_opt_select:
 
                 printf("%s", predicted_token);
                 fflush(stdout);
-                
+
             after_inference_testloop_print:
-                context_len += strlen(predicted_token);
-                context = realloc(context, context_len + 1);
-                if (!context){
+                // Append predicted token ID to context
+                context_tokens = realloc(context_tokens, (context_tokens_len + 1) * sizeof(int));
+                if (!context_tokens){
                     printf("Failed to allocate memory to track chat context.\n");
                     return false;
                 }
-                strcat(context, predicted_token);
+                context_tokens[context_tokens_len] = predicted_token_id;
+                context_tokens_len++;
                 if (eos){
                     break;
                 }
@@ -5969,362 +6090,380 @@ after_opt_select:
             if (timerresult > 0){
                 tok_per_s = 1000 * (float)(token_n) / (float)(timerresult);
             }
-            printf("(Generated in %lldms, %d tokens, %.2f tok/sec avr.)\n", timerresult, token_n, tok_per_s);
+            printf("(Generated in %lldms, %d tokens, %.2f tok/sec avr.)\n", timerresult, (int)token_n, tok_per_s);
         }
     }
 
     void train(int epochAmount){
-    long long train_timer = timer();
-    printf("Starting training...\n");
-    
-    float* loss_history = NULL;
-    size_t loss_history_len = 0;
+        long long train_timer = timer();
+        printf("Starting training...\n");
+        
+        float* loss_history = NULL;
+        size_t loss_history_len = 0;
 
-    for (int epoch = 0; epoch < epochAmount; epoch++){
-        float loss_sum = 0;
-        size_t loss_n = 0;
-        long long epoch_timer = timer();
-        printf("Starting epoch %d/%d...\n", epoch + 1, epochAmount);
-        for (int dataset = 0; dataset < training_dataset_paths_len; dataset++){
-            long long dataset_timer = timer();
-            printf("Training using dataset %d/%d...\n", dataset + 1, training_dataset_paths_len);
+        for (int epoch = 0; epoch < epochAmount; epoch++){
+            float loss_sum = 0;
+            size_t loss_n = 0;
+            long long epoch_timer = timer();
+            printf("Starting epoch %d/%d...\n", epoch + 1, epochAmount);
+            for (int dataset = 0; dataset < training_dataset_paths_len; dataset++){
+                long long dataset_timer = timer();
+                printf("Training using dataset %d/%d...\n", dataset + 1, training_dataset_paths_len);
 
-            long long dataset_read_timer = timer();
-            printf("Reading dataset...\n");
-            char* dataset_file = read_file(training_dataset_paths[dataset]);
-            if (!dataset_file){
-                printf("Failed to read dataset in %lldms.\n", timer_end(dataset_read_timer));
-                exit(1);
-            }
-            printf("Read dataset in %lldms.\n", timer_end(dataset_read_timer));
-
-            long long dataset_parse_timer = timer();
-            printf("Parsing dataset...\n");
-            cJSON* dataset_raw = cJSON_Parse(dataset_file);
-            if (!dataset_raw){
-                printf("Failed to parse dataset in %lldms. Common reasons are: dataset contains invalid json.\n", timer_end(dataset_parse_timer));
-                exit(1);
-            }
-            free(dataset_file);
-            printf("Parsed dataset in %lldms.\n", timer_end(dataset_parse_timer));
-
-            long long dataset_preprocess_timer = timer();
-            printf("Preprocessing dataset...\n");
-            int** dataset_token_sequences = NULL;
-            size_t* dataset_token_sequences_lens = NULL;
-            size_t dataset_token_sequences_len = 0;
-            bool** token_masks = NULL;
-            size_t* token_masks_lens = NULL;
-
-            if (!cJSON_IsArray(dataset_raw)){
-            dataset_structure_fail:
-                printf("Dataset structure is invalid. (failed dataset preprocess in %lldms)\n", timer_end(dataset_preprocess_timer));
-                exit(1);
-            }
-            
-            dataset_token_sequences_len = cJSON_GetArraySize(dataset_raw);
-            dataset_token_sequences = calloc(dataset_token_sequences_len * sizeof(int*), 1);
-            token_masks = calloc(dataset_token_sequences_len * sizeof(bool*), 1);
-
-            if ((!dataset_token_sequences) || (!token_masks)){
-            dataset_failed_alloc:
-                printf("Failed to allocate memory to preprocess dataset in %lldms.\n", timer_end(dataset_preprocess_timer));
-                exit(1);
-            }
-
-            dataset_token_sequences_lens = calloc(dataset_token_sequences_len * sizeof(size_t), 1);
-            token_masks_lens = calloc(dataset_token_sequences_len * sizeof(size_t), 1);
-            if ((!dataset_token_sequences_lens) || (!token_masks_lens)){
-                goto dataset_failed_alloc;
-            }
-
-            cJSON* item_raw = dataset_raw->child;
-            for (int index = 0; index < dataset_token_sequences_len; index++){
-                if (!cJSON_IsObject(item_raw)){
-                    goto dataset_structure_fail;
+                long long dataset_read_timer = timer();
+                printf("Reading dataset...\n");
+                char* dataset_file = read_file(training_dataset_paths[dataset]);
+                if (!dataset_file){
+                    printf("Failed to read dataset in %lldms.\n", timer_end(dataset_read_timer));
+                    exit(1);
                 }
+                printf("Read dataset in %lldms.\n", timer_end(dataset_read_timer));
 
-                cJSON* item_system_prompt_raw = cJSON_GetObjectItem(item_raw, "system_prompt");
-                if (!item_system_prompt_raw){
-                    goto dataset_structure_fail;
+                long long dataset_parse_timer = timer();
+                printf("Parsing dataset...\n");
+                cJSON* dataset_raw = cJSON_Parse(dataset_file);
+                if (!dataset_raw){
+                    printf("Failed to parse dataset in %lldms. Common reasons are: dataset contains invalid json.\n", timer_end(dataset_parse_timer));
+                    exit(1);
                 }
-                if (!cJSON_IsString(item_system_prompt_raw)){
-                    goto dataset_structure_fail;
+                free(dataset_file);
+                printf("Parsed dataset in %lldms.\n", timer_end(dataset_parse_timer));
+
+                long long dataset_preprocess_timer = timer();
+                printf("Preprocessing dataset...\n");
+                int** dataset_token_sequences = NULL;
+                size_t* dataset_token_sequences_lens = NULL;
+                size_t dataset_token_sequences_len = 0;
+                bool** token_masks = NULL;
+                size_t* token_masks_lens = NULL;
+
+                if (!cJSON_IsArray(dataset_raw)){
+                dataset_structure_fail:
+                    printf("Dataset structure is invalid. (failed dataset preprocess in %lldms)\n", timer_end(dataset_preprocess_timer));
+                    exit(1);
                 }
                 
-                dataset_token_sequences[index] = NULL;
-                dataset_token_sequences_lens[index] = 0;
-                token_masks[index] = NULL;
-                token_masks_lens[index] = 0;
+                dataset_token_sequences_len = cJSON_GetArraySize(dataset_raw);
+                dataset_token_sequences = calloc(dataset_token_sequences_len * sizeof(int*), 1);
+                token_masks = calloc(dataset_token_sequences_len * sizeof(bool*), 1);
 
-                char* system_segment = malloc(strlen("<|bos|>\nSystem: ") + strlen(item_system_prompt_raw->valuestring) + 1);
-                if (!system_segment){
-                    goto dataset_failed_alloc;
-                }
-                strcpy(system_segment, "<|bos|>\nSystem: ");
-                strcat(system_segment, item_system_prompt_raw->valuestring);
-
-                tokenize_ret system_tokens = tokenize(system_segment);
-                free(system_segment);
-
-                dataset_token_sequences[index] = malloc(system_tokens.seq_len * sizeof(int));
-                if (!dataset_token_sequences[index]){
-                    free_tokenize_ret(system_tokens);
-                    goto dataset_failed_alloc;
-                }
-                memcpy(dataset_token_sequences[index], system_tokens.tokens, system_tokens.seq_len * sizeof(int));
-                dataset_token_sequences_lens[index] = system_tokens.seq_len;
-
-                token_masks[index] = malloc(system_tokens.seq_len * sizeof(bool));
-                if (!token_masks[index]){
-                    free_tokenize_ret(system_tokens);
-                    goto dataset_failed_alloc;
-                }
-                memset(token_masks[index], false, system_tokens.seq_len);
-                token_masks_lens[index] = system_tokens.seq_len;
-
-                free_tokenize_ret(system_tokens);
-
-                cJSON* turns_raw = cJSON_GetObjectItem(item_raw, "turns");
-                if (!turns_raw){
-                    goto dataset_structure_fail;
-                }
-                if (!cJSON_IsArray(turns_raw)){
-                    goto dataset_structure_fail;
-                }
-
-                size_t turns_len = cJSON_GetArraySize(turns_raw);
-                cJSON* turn_raw = turns_raw->child;
-                for (int subindex = 0; subindex < turns_len; subindex++){
-                    if (!cJSON_IsObject(turn_raw)){
-                        goto dataset_structure_fail;
-                    }
-
-                    cJSON* turn_person = cJSON_GetObjectItem(turn_raw, "person");
-                    cJSON* turn_model = cJSON_GetObjectItem(turn_raw, "model");
-                    if ((!turn_person) || (!turn_model)){
-                        goto dataset_structure_fail;
-                    }
-                    if ((!cJSON_IsString(turn_person)) || (!cJSON_IsString(turn_model))){
-                        goto dataset_structure_fail;
-                    }
-
-                    char* context_segment = malloc(strlen("\n\nPerson:\n") + strlen(turn_person->valuestring) + strlen("\nYou:\n") + 1);
-                    if (!context_segment){
-                        goto dataset_failed_alloc;
-                    }
-                    strcpy(context_segment, "\n\nPerson:\n");
-                    strcat(context_segment, turn_person->valuestring);
-                    strcat(context_segment, "\nYou:\n");
-
-                    tokenize_ret context_tokens = tokenize(context_segment);
-                    free(context_segment);
-
-                    size_t old_len = dataset_token_sequences_lens[index];
-                    dataset_token_sequences[index] = realloc(dataset_token_sequences[index], (old_len + context_tokens.seq_len) * sizeof(int));
-                    if (!dataset_token_sequences[index]){
-                        free_tokenize_ret(context_tokens);
-                        goto dataset_failed_alloc;
-                    }
-                    memcpy(dataset_token_sequences[index] + old_len, context_tokens.tokens, context_tokens.seq_len * sizeof(int));
-
-                    size_t old_mask_len = token_masks_lens[index];
-                    token_masks[index] = realloc(token_masks[index], (old_mask_len + context_tokens.seq_len) * sizeof(bool));
-                    if (!token_masks[index]){
-                        free_tokenize_ret(context_tokens);
-                        goto dataset_failed_alloc;
-                    }
-                    memset(token_masks[index] + old_mask_len, false, context_tokens.seq_len);
-
-                    dataset_token_sequences_lens[index] = old_len + context_tokens.seq_len;
-                    token_masks_lens[index] = old_mask_len + context_tokens.seq_len;
-                    free_tokenize_ret(context_tokens);
-
-                    tokenize_ret response_tokens = tokenize(turn_model->valuestring);
-
-                    old_len = dataset_token_sequences_lens[index];
-                    dataset_token_sequences[index] = realloc(dataset_token_sequences[index], (old_len + response_tokens.seq_len) * sizeof(int));
-                    if (!dataset_token_sequences[index]){
-                        free_tokenize_ret(response_tokens);
-                        goto dataset_failed_alloc;
-                    }
-                    memcpy(dataset_token_sequences[index] + old_len, response_tokens.tokens, response_tokens.seq_len * sizeof(int));
-
-                    old_mask_len = token_masks_lens[index];
-                    token_masks[index] = realloc(token_masks[index], (old_mask_len + response_tokens.seq_len) * sizeof(bool));
-                    if (!token_masks[index]){
-                        free_tokenize_ret(response_tokens);
-                        goto dataset_failed_alloc;
-                    }
-                    memset(token_masks[index] + old_mask_len, true, response_tokens.seq_len);
-
-                    dataset_token_sequences_lens[index] = old_len + response_tokens.seq_len;
-                    token_masks_lens[index] = old_mask_len + response_tokens.seq_len;
-                    free_tokenize_ret(response_tokens);
-
-                    int eos_token_id = token_to_id("<|eos|>");
-                    old_len = dataset_token_sequences_lens[index];
-                    dataset_token_sequences[index] = realloc(dataset_token_sequences[index], (old_len + 1) * sizeof(int));
-                    if (!dataset_token_sequences[index]){
-                        goto dataset_failed_alloc;
-                    }
-                    dataset_token_sequences[index][old_len] = eos_token_id;
-                    dataset_token_sequences_lens[index] = old_len + 1;
-
-                    old_mask_len = token_masks_lens[index];
-                    token_masks[index] = realloc(token_masks[index], (old_mask_len + 1) * sizeof(bool));
-                    if (!token_masks[index]){
-                        goto dataset_failed_alloc;
-                    }
-                    token_masks[index][old_mask_len] = true;
-                    token_masks_lens[index] = old_mask_len + 1;
-
-                    turn_raw = turn_raw->next;
-                }
-                
-                printf("=== DEBUG: Entry %d ===\n", index);
-                for (int dbg = 0; dbg < dataset_token_sequences_lens[index]; dbg++){
-                    char* tok_str = id_to_token(dataset_token_sequences[index][dbg]);
-                    printf("[%d|%s|%c] ", dataset_token_sequences[index][dbg], tok_str ? tok_str : "NULL", token_masks[index][dbg] ? 'T' : 'F');
-                }
-                printf("\n=== END DEBUG ===\n");
-
-                item_raw = item_raw->next;
-            }
-
-            cJSON_Delete(dataset_raw);
-
-            printf("Preprocessed dataset in %lldms.\n", timer_end(dataset_preprocess_timer));
-            
-            long long dataset_count_tokens_timer = timer();
-            printf("Counting tokens in dataset...\n");
-            size_t total_tokens = 0;
-            size_t total_entries = dataset_token_sequences_len;
-            for (int index = 0; index < total_entries; index++){
-                total_tokens += dataset_token_sequences_lens[index];
-            }
-
-            double avr_tokens_per_entry = (total_entries > 0) ? (double)(total_tokens) / (double)(total_entries) : 0.0f;
-            printf("%zu tokens in dataset, %.2f tok/dataset entry avr. (counted in %lldms)\n", total_tokens, avr_tokens_per_entry, timer_end(dataset_count_tokens_timer));
-
-            for (int index = 0; index < total_entries; index++){
-                long long entry_timer = timer();
-                printf("Training on entry %d/%d...\n", index + 1, total_entries);
-                int* entry_tokens = dataset_token_sequences[index];
-                size_t entry_tokens_len = dataset_token_sequences_lens[index];
-                bool* entry_mask = token_masks[index];
-                size_t entry_mask_len = token_masks_lens[index];
-                if (entry_mask_len != entry_tokens_len){
-                    printf("[Dataset] Token count mismatch on entry %d: mask_len=%zu, token_len=%zu. Aborting to avoid OOB.\n", index, entry_mask_len, entry_tokens_len);
+                if ((!dataset_token_sequences) || (!token_masks)){
+                dataset_failed_alloc:
+                    printf("Failed to allocate memory to preprocess dataset in %lldms.\n", timer_end(dataset_preprocess_timer));
                     exit(1);
                 }
 
-                char* context = calloc(1, 1);
-                size_t context_len = 0;
+                dataset_token_sequences_lens = calloc(dataset_token_sequences_len * sizeof(size_t), 1);
+                token_masks_lens = calloc(dataset_token_sequences_len * sizeof(size_t), 1);
+                if ((!dataset_token_sequences_lens) || (!token_masks_lens)){
+                    goto dataset_failed_alloc;
+                }
 
-                for (int pos = 0; pos < entry_mask_len; pos++){
-                    if (!entry_mask[pos]){
+                cJSON* item_raw = dataset_raw->child;
+                for (int index = 0; index < dataset_token_sequences_len; index++){
+                    if (!cJSON_IsObject(item_raw)){
+                        goto dataset_structure_fail;
+                    }
+
+                    cJSON* item_system_prompt_raw = cJSON_GetObjectItem(item_raw, "system_prompt");
+                    if (!item_system_prompt_raw){
+                        goto dataset_structure_fail;
+                    }
+                    if (!cJSON_IsString(item_system_prompt_raw)){
+                        goto dataset_structure_fail;
+                    }
+                    
+                    dataset_token_sequences[index] = NULL;
+                    dataset_token_sequences_lens[index] = 0;
+                    token_masks[index] = NULL;
+                    token_masks_lens[index] = 0;
+
+                    char* system_segment = malloc(strlen("<|bos|>\nSystem: ") + strlen(item_system_prompt_raw->valuestring) + 1);
+                    if (!system_segment){
+                        goto dataset_failed_alloc;
+                    }
+                    strcpy(system_segment, "<|bos|>\nSystem: ");
+                    strcat(system_segment, item_system_prompt_raw->valuestring);
+
+                    tokenize_ret system_tokens = tokenize(system_segment);
+                    free(system_segment);
+
+                    dataset_token_sequences[index] = malloc(system_tokens.seq_len * sizeof(int));
+                    if (!dataset_token_sequences[index]){
+                        free_tokenize_ret(system_tokens);
+                        goto dataset_failed_alloc;
+                    }
+                    memcpy(dataset_token_sequences[index], system_tokens.tokens, system_tokens.seq_len * sizeof(int));
+                    dataset_token_sequences_lens[index] = system_tokens.seq_len;
+
+                    token_masks[index] = malloc(system_tokens.seq_len * sizeof(bool));
+                    if (!token_masks[index]){
+                        free_tokenize_ret(system_tokens);
+                        goto dataset_failed_alloc;
+                    }
+                    memset(token_masks[index], false, system_tokens.seq_len);
+                    token_masks_lens[index] = system_tokens.seq_len;
+
+                    free_tokenize_ret(system_tokens);
+
+                    cJSON* turns_raw = cJSON_GetObjectItem(item_raw, "turns");
+                    if (!turns_raw){
+                        goto dataset_structure_fail;
+                    }
+                    if (!cJSON_IsArray(turns_raw)){
+                        goto dataset_structure_fail;
+                    }
+
+                    size_t turns_len = cJSON_GetArraySize(turns_raw);
+                    cJSON* turn_raw = turns_raw->child;
+                    for (int subindex = 0; subindex < turns_len; subindex++){
+                        if (!cJSON_IsObject(turn_raw)){
+                            goto dataset_structure_fail;
+                        }
+
+                        cJSON* turn_person = cJSON_GetObjectItem(turn_raw, "person");
+                        cJSON* turn_model = cJSON_GetObjectItem(turn_raw, "model");
+                        if ((!turn_person) || (!turn_model)){
+                            goto dataset_structure_fail;
+                        }
+                        if ((!cJSON_IsString(turn_person)) || (!cJSON_IsString(turn_model))){
+                            goto dataset_structure_fail;
+                        }
+
+                        char* context_segment = malloc(strlen("\n\nPerson:\n") + strlen(turn_person->valuestring) + strlen("\nYou:\n") + 1);
+                        if (!context_segment){
+                            goto dataset_failed_alloc;
+                        }
+                        strcpy(context_segment, "\n\nPerson:\n");
+                        strcat(context_segment, turn_person->valuestring);
+                        strcat(context_segment, "\nYou:\n");
+
+                        tokenize_ret context_tokens = tokenize(context_segment);
+                        free(context_segment);
+
+                        size_t old_len = dataset_token_sequences_lens[index];
+                        dataset_token_sequences[index] = realloc(dataset_token_sequences[index], (old_len + context_tokens.seq_len) * sizeof(int));
+                        if (!dataset_token_sequences[index]){
+                            free_tokenize_ret(context_tokens);
+                            goto dataset_failed_alloc;
+                        }
+                        memcpy(dataset_token_sequences[index] + old_len, context_tokens.tokens, context_tokens.seq_len * sizeof(int));
+
+                        size_t old_mask_len = token_masks_lens[index];
+                        token_masks[index] = realloc(token_masks[index], (old_mask_len + context_tokens.seq_len) * sizeof(bool));
+                        if (!token_masks[index]){
+                            free_tokenize_ret(context_tokens);
+                            goto dataset_failed_alloc;
+                        }
+                        memset(token_masks[index] + old_mask_len, false, context_tokens.seq_len);
+
+                        dataset_token_sequences_lens[index] = old_len + context_tokens.seq_len;
+                        token_masks_lens[index] = old_mask_len + context_tokens.seq_len;
+                        free_tokenize_ret(context_tokens);
+
+                        tokenize_ret response_tokens = tokenize(turn_model->valuestring);
+
+                        old_len = dataset_token_sequences_lens[index];
+                        dataset_token_sequences[index] = realloc(dataset_token_sequences[index], (old_len + response_tokens.seq_len) * sizeof(int));
+                        if (!dataset_token_sequences[index]){
+                            free_tokenize_ret(response_tokens);
+                            goto dataset_failed_alloc;
+                        }
+                        memcpy(dataset_token_sequences[index] + old_len, response_tokens.tokens, response_tokens.seq_len * sizeof(int));
+
+                        old_mask_len = token_masks_lens[index];
+                        token_masks[index] = realloc(token_masks[index], (old_mask_len + response_tokens.seq_len) * sizeof(bool));
+                        if (!token_masks[index]){
+                            free_tokenize_ret(response_tokens);
+                            goto dataset_failed_alloc;
+                        }
+                        memset(token_masks[index] + old_mask_len, true, response_tokens.seq_len);
+
+                        dataset_token_sequences_lens[index] = old_len + response_tokens.seq_len;
+                        token_masks_lens[index] = old_mask_len + response_tokens.seq_len;
+                        free_tokenize_ret(response_tokens);
+
+                        int eos_token_id = token_to_id("<|eos|>");
+                        old_len = dataset_token_sequences_lens[index];
+                        dataset_token_sequences[index] = realloc(dataset_token_sequences[index], (old_len + 1) * sizeof(int));
+                        if (!dataset_token_sequences[index]){
+                            goto dataset_failed_alloc;
+                        }
+                        dataset_token_sequences[index][old_len] = eos_token_id;
+                        dataset_token_sequences_lens[index] = old_len + 1;
+
+                        old_mask_len = token_masks_lens[index];
+                        token_masks[index] = realloc(token_masks[index], (old_mask_len + 1) * sizeof(bool));
+                        if (!token_masks[index]){
+                            goto dataset_failed_alloc;
+                        }
+                        token_masks[index][old_mask_len] = true;
+                        token_masks_lens[index] = old_mask_len + 1;
+
+                        turn_raw = turn_raw->next;
+                    }
+                    
+                    if (debug){
+                        printf("=== DEBUG: Entry %d ===\n", index);
+                        for (int dbg = 0; dbg < dataset_token_sequences_lens[index]; dbg++){
+                            char* tok_str = id_to_token(dataset_token_sequences[index][dbg]);
+                            printf("[%d|%s|%c] ", dataset_token_sequences[index][dbg], tok_str ? tok_str : "NULL", token_masks[index][dbg] ? 'T' : 'F');
+                        }
+                        printf("\n=== END DEBUG ===\n");
+                    }
+
+                    item_raw = item_raw->next;
+                }
+
+                cJSON_Delete(dataset_raw);
+
+                printf("Preprocessed dataset in %lldms.\n", timer_end(dataset_preprocess_timer));
+                
+                long long dataset_count_tokens_timer = timer();
+                printf("Counting tokens in dataset...\n");
+                size_t total_tokens = 0;
+                size_t total_entries = dataset_token_sequences_len;
+                for (int index = 0; index < total_entries; index++){
+                    total_tokens += dataset_token_sequences_lens[index];
+                }
+
+                double avr_tokens_per_entry = (total_entries > 0) ? (double)(total_tokens) / (double)(total_entries) : 0.0f;
+                printf("%zu tokens in dataset, %.2f tok/dataset entry avr. (counted in %lldms)\n", total_tokens, avr_tokens_per_entry, timer_end(dataset_count_tokens_timer));
+
+                for (int index = 0; index < total_entries; index++){
+                    long long entry_timer = timer();
+                    printf("Training on entry %d/%d...\n", index + 1, total_entries);
+                    int* entry_tokens = dataset_token_sequences[index];
+                    size_t entry_tokens_len = dataset_token_sequences_lens[index];
+                    bool* entry_mask = token_masks[index];
+                    size_t entry_mask_len = token_masks_lens[index];
+                    if (entry_mask_len != entry_tokens_len){
+                        printf("[Dataset] Token count mismatch on entry %d: mask_len=%zu, token_len=%zu. Aborting to avoid OOB.\n", index, entry_mask_len, entry_tokens_len);
+                        exit(1);
+                    }
+
+                    // Build up context as token array instead of string
+                    int* context_tokens = NULL;
+                    size_t context_tokens_len = 0;
+
+                    for (int pos = 0; pos < entry_mask_len; pos++){
                         int tok_id = entry_tokens[pos];
                         if (tok_id < 0 || tok_id >= vocab_len){
                             printf("HEAP CORRUPTION DETECTED: token_id=%d out of range [0, %d)\n", tok_id, vocab_len);
                             exit(1);
                         }
-                        char* curr_token = id_to_token(tok_id);
-                        if (!curr_token){
-                            printf("HEAP CORRUPTION DETECTED: id_to_token(%d) returned NULL\n", tok_id);
+
+                        if (!entry_mask[pos]){
+                            // Non-trainable token - just add to context
+                            context_tokens_len++;
+                            context_tokens = realloc(context_tokens, context_tokens_len * sizeof(int));
+                            if (!context_tokens){
+                                printf("Failed to allocate memory to process training context tokens.\n");
+                                exit(1);
+                            }
+                            context_tokens[context_tokens_len - 1] = tok_id;
+                        }
+                        else{
+                            // Trainable token - create task with current context, then add token to context
+                            train_step_token target = {0};
+                            target.token = id_to_token(tok_id);
+                            target.token_id = tok_id;
+
+                            // Duplicate the current context tokens for the worker
+                            int* context_copy = malloc(context_tokens_len * sizeof(int));
+                            if (!context_copy){
+                                printf("Failed to allocate memory to copy context tokens.\n");
+                                exit(1);
+                            }
+                            memcpy(context_copy, context_tokens, context_tokens_len * sizeof(int));
+                            add_to_worker_tasklist(context_copy, context_tokens_len, target);
+
+                            // Add this token to context for next iteration
+                            context_tokens_len++;
+                            context_tokens = realloc(context_tokens, context_tokens_len * sizeof(int));
+                            if (!context_tokens){
+                                printf("Failed to allocate memory to process training context tokens.\n");
+                                exit(1);
+                            }
+                            context_tokens[context_tokens_len - 1] = tok_id;
+                        }
+
+                        int debug_tok = dataset_token_sequences[0][0];
+                        if (debug_tok < 0 || debug_tok >= vocab_len){
+                            printf("CORRUPTION BEFORE flush: token[0]=%d\n", debug_tok);
                             exit(1);
                         }
-                        size_t curr_token_len = strlen(curr_token);
-                        context_len += curr_token_len;
-                        context = realloc(context, context_len + 1);
-                        if (!context){
-                        training_context_failed_alloc:
-                            printf("Failed to allocate memory to process training context.\n");
+
+                        float loss_sum_add = flush_worker_tasklist_if_required();
+
+                        debug_tok = dataset_token_sequences[0][0];
+                        if (debug_tok < 0 || debug_tok >= vocab_len){
+                            printf("CORRUPTION AFTER flush: token[0]=%d\n", debug_tok);
                             exit(1);
                         }
-                        strcat(context, curr_token);
-                    }
-                    else{
-                        train_step_token target = {0};
-                        target.token = id_to_token(entry_tokens[pos]);
-                        target.token_id = entry_tokens[pos];
-                        add_to_worker_tasklist(strdup(context), target);
-                        
-                        context_len += strlen(target.token);
-                        context = realloc(context, context_len + 1);
-                        if (!context){
-                            goto training_context_failed_alloc;
+
+                        if (loss_sum_add != -1){
+                            loss_sum += loss_sum_add;
+                            loss_n++;
                         }
-                        strcat(context, target.token);
                     }
-
-                    
-                    int debug_tok = dataset_token_sequences[0][0];
-                    if (debug_tok < 0 || debug_tok >= vocab_len){
-                        printf("CORRUPTION BEFORE flush: token[0]=%d\n", debug_tok);
-                        exit(1);
-                    }
-
-                    float loss_sum_add = flush_worker_tasklist_if_required();
-
-                    debug_tok = dataset_token_sequences[0][0];
-                    if (debug_tok < 0 || debug_tok >= vocab_len){
-                        printf("CORRUPTION AFTER flush: token[0]=%d\n", debug_tok);
-                        exit(1);
-                    }
-
-                    if (loss_sum_add != -1){
-                        loss_sum += loss_sum_add;
-                        loss_n++;
-                    }
+                    free(context_tokens);
+                    printf("Trained on entry %d/%d in %lldms.\n", index + 1, total_entries, timer_end(entry_timer));
                 }
-                free(context);
-                printf("Trained on entry %d/%d in %lldms.\n", index + 1, total_entries, timer_end(entry_timer));
-            }
+                printf("Flushing remaining worker tasks (if any)...\n");
+                long long timer_remaining = timer();
+                float loss_avr_remaining = flush_worker_tasklist(); //If there are any additional things left for some reason
+                if (!loss_avr_remaining == -1){
+                    printf("There weren't any remaining worker tasks to flush (found out in %lldms).\n", timer_end(timer_remaining));
+                }
+                else{
+                    printf("Flushed remaining worker tasks with avr loss %f in %lldms.\n", loss_avr_remaining, timer_end(timer_remaining));
+                }
 
-            for (int index = 0; index < total_entries; index++){
-                free(dataset_token_sequences[index]);
-                free(token_masks[index]);
+                for (int index = 0; index < total_entries; index++){
+                    free(dataset_token_sequences[index]);
+                    free(token_masks[index]);
+                }
+                free(dataset_token_sequences);
+                free(dataset_token_sequences_lens);
+                free(token_masks);
+                free(token_masks_lens);
+                printf("Trained using dataset %d/%d in %lldms.\n", dataset + 1, training_dataset_paths_len, timer_end(dataset_timer));
             }
-            free(dataset_token_sequences);
-            free(dataset_token_sequences_lens);
-            free(token_masks);
-            free(token_masks_lens);
-            printf("Trained using dataset %d/%d in %lldms.\n", dataset + 1, training_dataset_paths_len, timer_end(dataset_timer));
-        }
-        float loss_avr = loss_sum / (float)(loss_n);
-        loss_history_len++;
-        loss_history = realloc(loss_history, loss_history_len * sizeof(float));
-        if (!loss_history){
-            printf("Failed to allocate memory to track loss history.\n");
-            exit(1);
-        }
-        loss_history[loss_history_len - 1] = loss_avr;
-        printf("Finished epoch %d/%d in %lldms.\n", epoch + 1, epochAmount, timer_end(epoch_timer));
+            float loss_avr = loss_sum / (float)(loss_n);
+            loss_history_len++;
+            loss_history = realloc(loss_history, loss_history_len * sizeof(float));
+            if (!loss_history){
+                printf("Failed to allocate memory to track loss history.\n");
+                exit(1);
+            }
+            loss_history[loss_history_len - 1] = loss_avr;
+            printf("Finished epoch %d/%d in %lldms.\n", epoch + 1, epochAmount, timer_end(epoch_timer));
 
-        char* checkpoint_response = input_with_timeout("Do you want to open checkpoint cli? (30 seconds to answer): ", 30000);
-        if (checkpoint_response){
-            free(checkpoint_response);
-            bool should_stop = training_interactive_cli(loss_avr, loss_history, loss_history_len, epoch + 1, epochAmount);
-            if (should_stop){
-                break;
+            char* checkpoint_response = input_with_timeout("Do you want to open checkpoint cli? (30 seconds to answer): ", 30000);
+            if (checkpoint_response){
+                free(checkpoint_response);
+                bool should_stop = training_interactive_cli(loss_avr, loss_history, loss_history_len, epoch + 1, epochAmount);
+                if (should_stop){
+                    break;
+                }
             }
         }
+        printf("Finished training for %d epochs in %lldms.\n", epochAmount, timer_end(train_timer));
+        return;
     }
-    printf("Finished training for %d epochs in %lldms.\n", epochAmount, timer_end(train_timer));
-    return;
-}
     if (do_train) {
         train(train_epochs);
     }
 
     printf("\n-----------------------------------------------------\n");
-    printf("Chat with the model (inference, default temp is 0.7):\n");
-    float temp = 0.7;
+        printf("Chat with the model (inference, default temp is 0):\n");
+        float temp = 0;
     printf("Commands:\n");
     printf("  /exit                      -- Exit the cli.\n");
     printf("  /save <filename>           -- Save model.\n");
     printf("  /temperature [temperature] -- Display/set current temperature.\n");
+    printf("  /reset_context             -- Reset conversation context.\n");
     printf("\n");
     printf("Do you want to enable multiline inputs? This will allow you to send messages multiple lines long, however as enter will be used to create a new line, you will have to use ctrl + d twice to send your message/command instead of just pressing enter.\n");
     char* multilineornot = NULL;
@@ -6362,13 +6501,38 @@ after_opt_select:
         }
     }
 
-    char* context = malloc(strlen("<|bos|>\nSystem: ") + 1);
-    if (!context){
-        printf("Failed to allocate memory to setup model chat interface.\n");
+    // Precompute template tokens
+    tokenize_ret bos_system_tok = tokenize("<|bos|>\nSystem: ");
+    if (!bos_system_tok.success){
+        printf("Failed to tokenize bos_system template.\n");
         return 1;
     }
-    strcpy(context, "<|bos|>\nSystem: ");
-    size_t context_len = strlen("<|bos|>\nSystem: ");
+    tokenize_ret person_tok = tokenize("\n\nPerson:\n");
+    if (!person_tok.success){
+        printf("Failed to tokenize person template.\n");
+        free_tokenize_ret(bos_system_tok);
+        return 1;
+    }
+    tokenize_ret you_tok = tokenize("\nYou:\n");
+    if (!you_tok.success){
+        printf("Failed to tokenize you template.\n");
+        free_tokenize_ret(bos_system_tok);
+        free_tokenize_ret(person_tok);
+        return 1;
+    }
+
+    // Initialize context with bos_system tokens
+    int* context_tokens = malloc(bos_system_tok.seq_len * sizeof(int));
+    if (!context_tokens){
+        printf("Failed to allocate memory to setup model chat interface.\n");
+        free_tokenize_ret(bos_system_tok);
+        free_tokenize_ret(person_tok);
+        free_tokenize_ret(you_tok);
+        return 1;
+    }
+    memcpy(context_tokens, bos_system_tok.tokens, bos_system_tok.seq_len * sizeof(int));
+    size_t context_tokens_len = bos_system_tok.seq_len;
+
     while (true){
         printf("\nYou:\n");
         char* input_to_inference = use_multiline ? input_multiline("› ") : input("› ");
@@ -6380,6 +6544,22 @@ after_opt_select:
         size_t input_to_inference_len = strlen(input_to_inference);
         if (strcmp(input_to_inference, "/exit") == 0){
             return 0;
+        }
+        else if (strcmp(input_to_inference, "/reset_context") == 0){
+            free(input_to_inference);
+            free(context_tokens);
+            context_tokens = malloc(bos_system_tok.seq_len * sizeof(int));
+            if (!context_tokens){
+                printf("Failed to allocate memory to reset context.\n");
+                free_tokenize_ret(bos_system_tok);
+                free_tokenize_ret(person_tok);
+                free_tokenize_ret(you_tok);
+                return 1;
+            }
+            memcpy(context_tokens, bos_system_tok.tokens, bos_system_tok.seq_len * sizeof(int));
+            context_tokens_len = bos_system_tok.seq_len;
+            printf("Context has been reset.\n");
+            continue;
         }
         else{
             if (input_to_inference_len >= strlen("/save x")){
@@ -6448,15 +6628,29 @@ after_opt_select:
         }
 
     generate_turn:
-        context = realloc(context, context_len + input_to_inference_len + strlen("\n\nPerson:\n\nYou:\n") + 1);
-        if (!context){
+        // Tokenize user input
+        tokenize_ret input_tok = tokenize(input_to_inference);
+        if (!input_tok.success){
+            printf("Failed to tokenize user input.\n");
+            free(input_to_inference);
+            continue;
+        }
+
+        // Append person_tok + input_tok + you_tok to context
+        size_t new_len = context_tokens_len + person_tok.seq_len + input_tok.seq_len + you_tok.seq_len;
+        context_tokens = realloc(context_tokens, new_len * sizeof(int));
+        if (!context_tokens){
             printf("Failed to allocate memory to track chat context.\n");
+            free_tokenize_ret(input_tok);
             return 1;
         }
-        context_len += input_to_inference_len + strlen("\n\nPerson:\n\nYou:\n");
-        strcat(context, "\n\nPerson:\n");
-        strcat(context, input_to_inference);
-        strcat(context, "\nYou:\n");
+        memcpy(context_tokens + context_tokens_len, person_tok.tokens, person_tok.seq_len * sizeof(int));
+        context_tokens_len += person_tok.seq_len;
+        memcpy(context_tokens + context_tokens_len, input_tok.tokens, input_tok.seq_len * sizeof(int));
+        context_tokens_len += input_tok.seq_len;
+        memcpy(context_tokens + context_tokens_len, you_tok.tokens, you_tok.seq_len * sizeof(int));
+        context_tokens_len += you_tok.seq_len;
+        free_tokenize_ret(input_tok);
 
         printf("Model:\n");
         long long generate_timer = timer();
@@ -6466,11 +6660,11 @@ after_opt_select:
                 printf("[Reached max output size]\n");
                 break;
             }
-            if (token_n > contextSize){
+            if (context_tokens_len >= contextSize){
                 printf("[Context full]\n");
                 break;
             }
-            infret rets = inference(context, false, temp, false);
+            infret rets = inference(context_tokens, context_tokens_len, false, temp, false);
             if (!rets.success){
                 printf("[Inference failure]\n");
                 break;
@@ -6488,18 +6682,18 @@ after_opt_select:
             printf("%s", predicted_token);
             fflush(stdout);
 
-            context_len += strlen(predicted_token);
-            context = realloc(context, context_len + 1);
-            if (!context){
+            // Append predicted token ID to context
+            context_tokens = realloc(context_tokens, (context_tokens_len + 1) * sizeof(int));
+            if (!context_tokens){
                 printf("Failed to allocate memory to track chat context.\n");
                 return 1;
             }
+            context_tokens[context_tokens_len] = predicted_token_id;
+            context_tokens_len++;
 
             if (eos){
                 break;
             }
-
-            strcat(context, predicted_token);
         }
         long long timerresult = timer_end(generate_timer);
         free(input_to_inference);
@@ -6507,7 +6701,7 @@ after_opt_select:
         if (timerresult > 0){
             tok_per_s = 1000 * (float)(token_n) / (float)(timerresult);
         }
-        printf("(Generated in %lldms, %d tokens, %.2f tok/sec avr.)\n", timerresult, token_n, tok_per_s);
+        printf("(Generated in %lldms, %d tokens, %.2f tok/sec avr.)\n", timerresult, (int)token_n, tok_per_s);
     }
 
     //NOTE: Old demos
