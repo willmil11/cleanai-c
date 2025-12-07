@@ -1,5 +1,6 @@
 #include <stdlib.h>
 #include <stdio.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <time.h>
 #include <string.h>
@@ -12,6 +13,9 @@
 
 #include "libs/miniz.h"
 #include "libs/miniz.c"
+
+float lr_plateau_best_loss = __FLT_MAX__;
+int lr_plateau_counter = 0;
 
 #ifdef _WIN32 //windows compability is pain ;(
 #include <windows.h>
@@ -107,7 +111,7 @@ char* input_with_timeout(char* qry, int timeout_ms){
     printf("%s", qry);
     fflush(stdout);
     
-    char* buff = malloc(4096);
+    char* buff = malloc(4096); //Well here and in the other version its fine cuz this one is used for nothing important so idc
     if (!buff) {
         printf("Failed to allocate memory to read input.\n");
         return NULL;
@@ -162,9 +166,9 @@ typedef void* THREAD_RETURN;
         pthread_create(&out_thread, NULL, fn, arg);     \
     } while (0)
 
-#define thread_join(thread, ret_ptr)        \
-    do {                                    \
-        pthread_join(thread, ret_ptr);      \
+#define thread_join(thread, ret_ptr)                \
+    do {                                            \
+        pthread_join(thread, (void**)ret_ptr);      \
     } while (0)
 
 #endif
@@ -187,12 +191,12 @@ void sleep_ms(unsigned int ms) {
 char* input(char* qry){
     printf("%s", qry);
     fflush(stdout);
-    char* buff = malloc(4096); //4kb is sufficient
+    char* buff = malloc(512 * 1024); //4kb is sufficient -- future note, I am a dumbass AND NO, so yea 512kb
     if (!buff){
         printf("Failed to allocate memory to read input.\n");
         return NULL;
     }
-    if (fgets(buff, 4096, stdin)){
+    if (fgets(buff, 512 * 1024, stdin)){
         size_t len = strlen(buff);
         if (len > 0 && buff[len - 1] == '\n') {
             buff[len - 1] = '\0'; //remove the newline
@@ -203,6 +207,56 @@ char* input(char* qry){
         free(buff);
         return NULL;
     }
+}
+
+char* input_multiline(char* qry){
+    printf("%s", qry);
+    size_t qry_len = strlen(qry);
+    qry_len -= 2; //Stupid terminal alligment fix
+    char spacer[qry_len + 1];
+    memset(spacer, ' ', qry_len);
+    spacer[qry_len] = '\0';
+
+    char* resp = calloc(1, 1); //Dummy init
+    if (!resp){
+        printf("Failed to allocate memory to read multiline input.\n");
+    }
+    size_t resp_len = 0;
+
+    char* buff = malloc(512 * 1024);
+    if (!buff){
+        printf("Failed to allocate memory to read multiline input.\n");
+        free(resp);
+        return NULL;
+    }
+
+    while (true){
+        if (!fgets(buff, 512 * 1024, stdin)){
+            printf("\n");
+            fflush(stdout);
+            break;
+        }
+        size_t buff_dat_len = strlen(buff);
+        resp_len += buff_dat_len;
+        char* tmp = realloc(resp, resp_len + 1);
+        if (!tmp){
+            printf("Failed to allocate memory to read multiline input.\n");
+            free(resp);
+            free(buff);
+            return NULL;
+        }
+        resp = tmp;
+
+        strcat(resp, buff);
+        memset(buff, 0, 512 * 1024);
+        
+        printf("%s", spacer);
+        fflush(stdout);
+    }
+
+    clearerr(stdin);
+    free(buff);
+    return resp;
 }
 
 void help(char* issue){
@@ -286,7 +340,22 @@ char* read_file(const char* path) {
     return buffer;
 }
 
+#ifdef _WIN32
+    HANDLE timer_mutex = NULL;
+    void init_timer_mutex() {
+        timer_mutex = CreateMutexA(NULL, FALSE, NULL);
+    }
+    void lock_timer() { WaitForSingleObject(timer_mutex, INFINITE); }
+    void unlock_timer() { ReleaseMutex(timer_mutex); }
+#else
+    pthread_mutex_t timer_mutex = PTHREAD_MUTEX_INITIALIZER;
+    void init_timer_mutex() {}
+    void lock_timer() { pthread_mutex_lock(&timer_mutex); }
+    void unlock_timer() { pthread_mutex_unlock(&timer_mutex); }
+#endif
 int main(int argc, char** argv){
+    init_timer_mutex();
+
     int* ids = malloc(sizeof(int)); //initial dummy slot
 
     if (!ids){
@@ -379,33 +448,40 @@ int main(int argc, char** argv){
     int timers_len = 0; //0 elements
 
     long long timer(){
+        lock_timer();
+        
         if (!timers){
+            unlock_timer();
             return -1;
         }
 
         long long curr_time = time_ms();
-        
-        //grw
         long long id = (long long)(genid());
         
         long long** tmp_timers = realloc(timers, (timers_len + 1) * sizeof(long long*));
         if (!tmp_timers){
             printf("Failed memory allocation to grow timers list.\n");
+            unlock_timer();
             return -1;
         }
         timers = tmp_timers;
-        timers[timers_len] = malloc(2 * sizeof(long long)); //id, timestamp
-
+        timers[timers_len] = malloc(2 * sizeof(long long));
         if (!timers[timers_len]){
             printf("Failed memory allocation to grow timers list.\n");
+            unlock_timer();
+            return -1;
         }
         timers[timers_len][0] = id;
         timers[timers_len][1] = curr_time;
         timers_len++;
+        
+        unlock_timer();
         return id;
     }
 
     long long timer_end(long long timer_id){
+        lock_timer();
+        
         int indexOfTimer = -1;
         long long timer_time;
         for (int index = 0; index < timers_len; index++){
@@ -416,13 +492,14 @@ int main(int argc, char** argv){
             }
         }
         if (indexOfTimer == -1){
-            return -1; //invalid timer id.
+            unlock_timer();
+            return -1;
         }
 
-        //shrnk
         long long** new_timers = malloc((timers_len - 1) * sizeof(long long*));
         if (!new_timers){
             printf("Failed memory allocation to shrink timers list.\n");
+            unlock_timer();
             return -1;
         }
 
@@ -439,6 +516,7 @@ int main(int argc, char** argv){
                     free(new_timers[subindex]);
                 }
                 free(new_timers);
+                unlock_timer();
                 return -1;
             }
             new_timers[index - offset][0] = timers[index][0];
@@ -452,9 +530,9 @@ int main(int argc, char** argv){
         timers = new_timers;
         timers_len--;
         
-        //oh also
         freeId((int)(timer_id));
-
+        
+        unlock_timer();
         return timer_time;
     }
 
@@ -1092,9 +1170,11 @@ parse_config:
         }
         else{
             printf("[Config] [Info] Ignoring learningRate as you did not specify either --pretrain or --train.\n");
+            if (learningRate < 0){
+                printf("[Console] [Info] Showing tip anyways :)\n");
+            }
         }
         if (learningRate < 0){
-            printf("[Console] [Info] Showing tip anyways :)\n");
             printf("[Config] [Tip] A learningRate < 0 will make the model unlearn the data. This is not recomended, you are on your own, good luck.\n");
         }
     }
@@ -1309,6 +1389,81 @@ parse_config:
                 }
                 else{
                     printf("[Config] [Info] Ignoring heads as you are loading a model, not creating a new one.\n");
+                }
+            }
+        }
+    }
+
+    cJSON* learningRateDecay_raw = cJSON_GetObjectItem(config, "learningRateDecay");
+    double lr_reduce_amount = 0xdeadbeef;
+    if (!cJSON_IsNumber(learningRateDecay_raw)){
+        if (do_train || do_pretrain){
+            printf("[Config] [Fatal] learningRateDecay is missing/corrutped.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] learningRateDecay is missing/corrupted but you did not specify either --pretrain or --train therefore this can be ignored.\n");
+        }
+    }
+    else{
+        if (learningRateDecay_raw->valuedouble < 0){
+            if ((!do_pretrain) && (!do_train)){
+                printf("[Config] [Info] Ignoring learningRateDecay as you did not specify either --pretrain or --train.\n");
+                printf("[Console] [Info] Showing tip anyways :)\n");
+            }
+            else{
+                lr_reduce_amount = learningRateDecay_raw->valuedouble;
+            }
+            printf("[Config] [Tip] learningRateDecay is set to a negative number, this will cause learningRate to rise when patience is reached on plateau. This is not recomended, you are on your own, good luck.\n");
+        }
+        else{
+            if ((!do_pretrain) && (!do_train)){
+                printf("[Config] [Info] Ignoring learningRateDecay as you did not specify either --pretrain or --train.\n");
+            }
+            else{
+                lr_reduce_amount = learningRateDecay_raw->valuedouble;
+            }
+        }
+    }
+
+    cJSON* learningRateDecayPatience_raw = cJSON_GetObjectItem(config, "learningRateDecayPatience");
+    int patience = -1;
+
+    if (!cJSON_IsNumber(learningRateDecayPatience_raw)){
+        if (do_train || do_pretrain){
+            printf("[Config] [Fatal] learningRateDecayPatience is missing/corrutped.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] learningRateDecayPatience is missing/corrupted but you did not specify either --pretrain or --train therefore this can be ignored.\n");
+        }
+    }
+    else{
+        if (!isInt(learningRateDecayPatience_raw->valuedouble)){
+            if (do_train || do_pretrain){
+                printf("[Config] [Fatal] learningRateDecayPatience is supposed to be an int but it is a float.\n");
+                return 1;
+            }
+            else{
+                printf("[Config] [Warning] learningRateDecayPatience is supposed to be an int but it is a float, but you did not specify either --pretrain or --train therefore this can be ignored.\n");
+            }
+        }
+        else{
+            if ((int)(learningRateDecayPatience_raw->valuedouble) < 0){
+                if (do_train || do_pretrain){
+                    printf("[Config] [Fatal] learningRateDecayPatience is supposed to be >= 0 but it is set to %d.\n", (int)(learningRateDecayPatience_raw->valuedouble));
+                    return 1;
+                }
+                else{
+                    printf("[Config] [Warning] learningRateDecayPatience is supposed to be >= 0 but it is set to %d, but you did not specify either --pretrain or --train therefore this can be ignored.\n", (int)(learningRateDecayPatience_raw->valuedouble));
+                }
+            }
+            else{
+                if ((!do_pretrain) && (!do_train)){
+                    printf("[Config] [Info] Ignoring learningRateDecayPatience as you did not specify either --pretrain or --train.\n");
+                }
+                else{
+                    patience = (int)(learningRateDecayPatience_raw->valuedouble);
                 }
             }
         }
@@ -1598,6 +1753,11 @@ after_config_parse:
         int* tokens;
         bool success;
     } tokenize_ret;
+
+    void free_tokenize_ret(tokenize_ret rets){
+        free(rets.tokens);
+        return;
+    }
 
     tokenize_ret tokenize(char* str_) {
         tokenize_ret out = {0};
@@ -2727,6 +2887,73 @@ after_config_parse:
             printf("Loaded model in %lldms.\n", timer_end(timer_));
         }
     }
+
+    size_t param_total = (size_t)(
+        vocab_len*embeddingSize + vocab_len +
+        layersAmount * (
+            4*embeddingSize +
+            heads*3*(head_dim*embeddingSize + head_dim) +
+            embeddingSize*head_dim*heads + embeddingSize +
+            3*embeddingSize*embeddingSize*ffnGrowSize +
+            2*embeddingSize*ffnGrowSize + embeddingSize
+        )
+    );
+    
+    double total_mb_memory = 0;
+    size_t real_param_total = 0;
+
+    //To compute memory usage, compute using heaviest optimizer
+    char* optimizer = NULL;
+    if ((!train_optimizer) && (!pre_train_optimizer)){
+        optimizer = "sgd";
+        goto after_opt_select;
+    }
+    if ((strcmp(train_optimizer, "adam") == 0) || (strcmp(pre_train_optimizer, "adam") == 0)){
+        optimizer = "adam";
+    }
+    else{
+        if ((strcmp(train_optimizer, "sgd_momentum") == 0) || (strcmp(pre_train_optimizer, "sgd_momentum") == 0)){
+            optimizer = "sgd_momentum";
+        }
+        else{
+            if ((strcmp(train_optimizer, "sgd") == 0) || (strcmp(pre_train_optimizer, "sgd") == 0)){
+                optimizer = "sgd";
+            }
+        }
+    }
+
+after_opt_select:
+    printf("\nTotal model parameters and optimizer parameters:\n");
+    printf("  %zu (~%.2fM) model parameters (~%.2fmb memory)\n", param_total, (double)(param_total) / 1000000, (double)(param_total) * 4 / 1024 / 1024);
+    total_mb_memory += (double)(param_total) * 4 / 1024 / 1024;
+    real_param_total += param_total;
+    if (strcmp(optimizer, "sgd") == 0){
+        printf("  0 (~0.00M) moments optimizer parameters (~0.00mb memory)\n");
+    }
+    else{
+        if ((strcmp(optimizer, "sgd_momentum") == 0) || (strcmp(optimizer, "adam") == 0)){
+            if (do_pretrain || do_train){
+                printf("  %zu (~%.2fM) moments optimizer parameters (~%.2fmb memory)\n", param_total, (double)(param_total) / 1000000, (double)(param_total) * 4 / 1024 / 1024);
+                total_mb_memory += (double)(param_total) * 4 / 1024 / 1024;
+                real_param_total += param_total;
+            }
+        }
+    }
+    if ((strcmp(optimizer, "sgd") == 0) || (strcmp(optimizer, "sgd_momentum") == 0)){
+        printf("  0 (~0.00M) varience optimizer parameters (~0.00mb memory)\n");
+    }
+    else{
+        if (strcmp(optimizer, "adam") == 0){
+            if (do_pretrain || do_train){
+                printf("  %zu (~%.2fM) varience optimizer parameters (~%.2fmb memory)\n", param_total, (double)(param_total) / 1000000, (double)(param_total) * 4 / 1024 / 1024);
+                total_mb_memory += (double)(param_total) * 4 / 1024 / 1024;
+                real_param_total += param_total;
+            }
+        }
+    }
+    printf("Total:\n");
+    printf("  %zu (%.2fM) model and optimizer parameters.\n", real_param_total, (double)(real_param_total) / 1000000);
+    printf("  %.2fmb memory usage.\n", total_mb_memory);
 
     bool save(char* filepath){
         if (!filepath){
@@ -4352,6 +4579,14 @@ after_config_parse:
         }
         long long timer_token = timer();
         verbprintf("Computing next token...\n");
+
+        if (seq_len == 0){
+            printf("Cannot compute next token: sequence length is zero.\n");
+            rets.success = false;
+            cleanup();
+            return rets;
+        }
+
         float** scores = NULL;
         if (return_cache){
             scores = malloc(seq_len * sizeof(float*));
@@ -4366,7 +4601,8 @@ after_config_parse:
         param* vocab_weights = &vocab_projection.weights;
         param* vocab_biases = &vocab_projection.biases;
 
-        for (int pos = 0; pos < seq_len; pos++){
+        int start_pos = return_cache ? 0 : seq_len - 1;
+        for (int pos = start_pos; pos < seq_len; pos++){
             if (return_cache){
                 scores[pos] = calloc(vocab_len * sizeof(float), 1);
                 if (!scores[pos]){
@@ -4450,6 +4686,7 @@ after_config_parse:
 
     typedef struct {
         float** embedding_grads;
+        int* tokenized;
         layer* layer_grads;
         struct {
             param weights;
@@ -4462,6 +4699,9 @@ after_config_parse:
 
     void free_train_step_ret(train_step_ret ret){
         int seq_len = ret.seq_len;
+        if (ret.tokenized){
+            free(ret.tokenized);
+        }
         for (int index = 0; index < seq_len; index++){
             free(ret.embedding_grads[index]);
         }
@@ -4658,7 +4898,7 @@ after_config_parse:
         }
 
         train_step_ret rets = {0};
-        rets.layer_grads = notrack(malloc(layersAmount * sizeof(layer)), "Failed to allocate memory to store layer gradients.");
+        rets.layer_grads = notrack(calloc(layersAmount, sizeof(layer)), "Failed to allocate memory to store layer gradients.");
 
         rets.success = true;
         if (head_dim < 1){
@@ -4685,6 +4925,15 @@ after_config_parse:
 
         int seq_len = cache.seq_len;
         rets.seq_len = seq_len;
+        rets.tokenized = malloc(seq_len * sizeof(int));
+        if (!rets.tokenized){
+            printf("Failed to allocate memory to store token ids for gradients.\n");
+            rets.success = false;
+            free_cache_object(cache);
+            cleanup();
+            return rets;
+        }
+        memcpy(rets.tokenized, cache.tokenized, seq_len * sizeof(int));
 
         long long calculate_loss_timer = timer();
         printf("Calculating initial loss...\n");
@@ -5124,7 +5373,9 @@ after_config_parse:
     } threadData;
 
     THREAD_RETURN THREAD_CALL workerThread(void* arg){
-        threadData* data = arg;
+        threadData* data_ptr = arg;
+        threadData data = *data_ptr;
+        free(data_ptr);
 
         train_step_ret* rets = malloc(sizeof(train_step_ret));
         if (!rets){
@@ -5132,9 +5383,11 @@ after_config_parse:
             exit(1);
         }
 
-        train_step_ret stack_ret = train_step(data->context, data->target_token);
+        train_step_ret stack_ret = train_step(data.context, data.target_token);
 
         memcpy(rets, &stack_ret, sizeof(train_step_ret));
+        
+        free(data.context);  // ← Add this line
 
         return rets;
     }
@@ -5155,29 +5408,970 @@ after_config_parse:
     //     return rets;
     // }
 
-    float train(int epochAmount){
-        long long train_timer = timer();
-        printf("Starting training...\n");
+    typedef struct {
+        char* context;
+        train_step_token target;
+    } worker_task;
+
+    worker_task* worker_tasklist = NULL;
+    int worker_tasklist_len = 0;
+
+    void add_to_worker_tasklist(char* context, train_step_token target){
+        worker_tasklist_len++;
+        worker_tasklist = realloc(worker_tasklist, worker_tasklist_len * sizeof(worker_task));
+        if (!worker_tasklist){
+            printf("Failed to allocate memory to add worker task to worker tasklist.\n");
+            exit(1);
+        }
+        worker_tasklist[worker_tasklist_len - 1].target = target;
+        worker_tasklist[worker_tasklist_len - 1].context = context;
+        return;
+    }
+
+    train_step_ret** worker_gradients = NULL;
+    int worker_gradients_len = 0;
+
+    Thread* worker_threads = NULL;
+    int worker_threads_len = 0;
+
+    void apply_worker_gradients(){
+        if (worker_gradients_len < 1){
+            return;
+        }
+
+        char* optimizer = NULL;
+        if (do_train){
+            optimizer = train_optimizer;
+        }
+        else{
+            optimizer = pre_train_optimizer;
+        }
+
+        bool use_adam = true;
+        bool use_sgdm = false;
+        bool use_sgd = false;
+
+        if (optimizer){
+            if (strcmp(optimizer, "adam") == 0){
+                use_adam = true;
+                use_sgdm = false;
+                use_sgd = false;
+            }
+            else{
+                if (strcmp(optimizer, "sgd_momentum") == 0){
+                    use_adam = false;
+                    use_sgdm = true;
+                    use_sgd = false;
+                }
+                else{
+                    if (strcmp(optimizer, "sgd") == 0){
+                        use_adam = false;
+                        use_sgdm = false;
+                        use_sgd = true;
+                    }
+                }
+            }
+        }
+
+        float lr = (float)(learningRate);
+        float inv_batch = 1.0f / (float)(worker_gradients_len);
+
+        float loss_sum = 0.0f;
+        int loss_count = 0;
+        for (int index = 0; index < worker_gradients_len; index++){
+            train_step_ret* grad = worker_gradients[index];
+            if (!grad){
+                continue;
+            }
+            if (!grad->success){
+                continue;
+            }
+            loss_sum += grad->initial_loss;
+            loss_count++;
+        }
+
+        if (loss_count > 0){
+            float avg_loss = loss_sum / (float)(loss_count);
+            if (avg_loss < lr_plateau_best_loss - 1e-6f){
+                lr_plateau_best_loss = avg_loss;
+                lr_plateau_counter = 0;
+            }
+            else{
+                lr_plateau_counter++;
+                if (lr_plateau_counter >= patience){
+                    learningRate *= lr_reduce_amount;
+                    lr_plateau_counter = 0;
+                    printf("Reduced learning rate to %f after plateau (avg_loss=%.6f best=%.6f).\n", learningRate, avg_loss, lr_plateau_best_loss);
+                }
+            }
+            lr = (float)(learningRate);
+        }
+
+        void ensure_moments(param* p, size_t count, bool need_m, bool need_v){
+            if (need_m){
+                if (!p->m){
+                    p->m = calloc(count, sizeof(float));
+                    if (!p->m){
+                        printf("Failed to allocate memory for optimizer moments.\n");
+                        exit(1);
+                    }
+                }
+            }
+            if (need_v){
+                if (!p->v){
+                    p->v = calloc(count, sizeof(float));
+                    if (!p->v){
+                        printf("Failed to allocate memory for optimizer moments.\n");
+                        exit(1);
+                    }
+                }
+            }
+        }
+
+        void update_param(param* p, float* grad_ptr, size_t count, float grad_scale){
+            bool need_m = use_adam || use_sgdm;
+            bool need_v = use_adam;
+            ensure_moments(p, count, need_m, need_v);
+            for (size_t subindex = 0; subindex < count; subindex++){
+                float g = grad_ptr[subindex] * grad_scale;
+                if (use_adam){
+                    p->m[subindex] = adam_params.beta1 * p->m[subindex] + (1.0f - adam_params.beta1) * g;
+                    p->v[subindex] = adam_params.beta2 * p->v[subindex] + (1.0f - adam_params.beta2) * g * g;
+                    float m_hat = p->m[subindex] / (1.0f - powf(adam_params.beta1, adam_params.t));
+                    float v_hat = p->v[subindex] / (1.0f - powf(adam_params.beta2, adam_params.t));
+                    p->param[subindex] -= lr * m_hat / (sqrtf(v_hat) + adam_params.epsilon);
+                }
+                else{
+                    if (use_sgdm){
+                        p->m[subindex] = adam_params.beta1 * p->m[subindex] + g;
+                        p->param[subindex] -= lr * p->m[subindex];
+                    }
+                    else{
+                        p->param[subindex] -= lr * g;
+                    }
+                }
+            }
+        }
+
+        if (use_adam){
+            adam_params.t += 1;
+        }
+        step_num += 1;
+
+        for (int index = 0; index < worker_gradients_len; index++){
+            train_step_ret* grad = worker_gradients[index];
+            if (!grad){
+                continue;
+            }
+            if (!grad->success){
+                // Don't call free_train_step_ret on failed results - they have uninitialized memory
+                if (grad->layer_grads){
+                    free(grad->layer_grads);
+                }
+                free(grad);
+                continue;
+            }
+            float grad_scale = inv_batch;
+
+            for (int layer = 0; layer < layersAmount; layer++){
+                update_param(&layers[layer].weights.normalize_1, grad->layer_grads[layer].weights.normalize_1.param, embeddingSize, grad_scale);
+                update_param(&layers[layer].weights.normalize_2, grad->layer_grads[layer].weights.normalize_2.param, embeddingSize, grad_scale);
+                update_param(&layers[layer].biases.normalize_1, grad->layer_grads[layer].biases.normalize_1.param, embeddingSize, grad_scale);
+                update_param(&layers[layer].biases.normalize_2, grad->layer_grads[layer].biases.normalize_2.param, embeddingSize, grad_scale);
+
+                for (int head = 0; head < heads; head++){
+                    update_param(&layers[layer].weights.attention.heads[head].query, grad->layer_grads[layer].weights.attention.heads[head].query.param, head_dim * embeddingSize, grad_scale);
+                    update_param(&layers[layer].weights.attention.heads[head].key, grad->layer_grads[layer].weights.attention.heads[head].key.param, head_dim * embeddingSize, grad_scale);
+                    update_param(&layers[layer].weights.attention.heads[head].value, grad->layer_grads[layer].weights.attention.heads[head].value.param, head_dim * embeddingSize, grad_scale);
+                    update_param(&layers[layer].biases.attention.heads[head].query, grad->layer_grads[layer].biases.attention.heads[head].query.param, head_dim, grad_scale);
+                    update_param(&layers[layer].biases.attention.heads[head].key, grad->layer_grads[layer].biases.attention.heads[head].key.param, head_dim, grad_scale);
+                    update_param(&layers[layer].biases.attention.heads[head].value, grad->layer_grads[layer].biases.attention.heads[head].value.param, head_dim, grad_scale);
+                }
+
+                update_param(&layers[layer].weights.attention.output, grad->layer_grads[layer].weights.attention.output.param, embeddingSize * (head_dim * heads), grad_scale);
+                update_param(&layers[layer].biases.attention.output, grad->layer_grads[layer].biases.attention.output.param, embeddingSize, grad_scale);
+
+                update_param(&layers[layer].weights.feed_forward.grow, grad->layer_grads[layer].weights.feed_forward.grow.param, embeddingSize * (embeddingSize * ffnGrowSize), grad_scale);
+                update_param(&layers[layer].weights.feed_forward.gate, grad->layer_grads[layer].weights.feed_forward.gate.param, embeddingSize * (embeddingSize * ffnGrowSize), grad_scale);
+                update_param(&layers[layer].weights.feed_forward.shrink, grad->layer_grads[layer].weights.feed_forward.shrink.param, embeddingSize * (embeddingSize * ffnGrowSize), grad_scale);
+
+                update_param(&layers[layer].biases.feed_forward.grow, grad->layer_grads[layer].biases.feed_forward.grow.param, embeddingSize * ffnGrowSize, grad_scale);
+                update_param(&layers[layer].biases.feed_forward.gate, grad->layer_grads[layer].biases.feed_forward.gate.param, embeddingSize * ffnGrowSize, grad_scale);
+                update_param(&layers[layer].biases.feed_forward.shrink, grad->layer_grads[layer].biases.feed_forward.shrink.param, embeddingSize, grad_scale);
+            }
+
+            update_param(&vocab_projection.weights, grad->vocab_projection.weights.param, vocab_len * embeddingSize, grad_scale);
+            update_param(&vocab_projection.biases, grad->vocab_projection.biases.param, vocab_len, grad_scale);
+
+            for (int index = 0; index < grad->seq_len; index++){
+                int tok_id = -1;
+                if (grad->tokenized){
+                    tok_id = grad->tokenized[index];
+                }
+                if (tok_id < 0){
+                    continue;
+                }
+                if (tok_id >= vocab_len){
+                    continue;
+                }
+                update_param(&embeddings[tok_id], grad->embedding_grads[index], embeddingSize, grad_scale);
+            }
+
+            free_train_step_ret(*grad);
+            free(grad);
+        }
+
+        free(worker_gradients);
+        worker_gradients = NULL;
+        worker_gradients_len = 0;
+    }
+
+    float flush_worker_tasklist(){
+        if (worker_tasklist_len < 1){
+            return -1;
+        }
         
-        long long token_count_timer = timer();
-        printf("Counting amount of tokens in dataset files...\n");
-        printf("Processing %d dataset files...", training_dataset_paths_len);
+        float loss_sum = 0;
+        size_t loss_n = 0;
+        while (worker_tasklist_len > 0){
+            //We copy from the end so we can just realloc down to shrink the list instead of rebuilding
+            int lower_cpy_idx = (worker_tasklist_len > batchSize) ? worker_tasklist_len - batchSize : 0;
+            int amountToCpy = (worker_tasklist_len > batchSize) ? batchSize : worker_tasklist_len;
+
+            int previous_worker_gradients_len = worker_gradients_len;
+            
+            worker_gradients_len += amountToCpy;
+            worker_gradients = realloc(worker_gradients, worker_gradients_len * sizeof(train_step_ret*));
+            if (!worker_gradients){
+                printf("Failed to allocate memory to store worker gradients.\n");
+                exit(1);
+            }
+
+            int worker_write_idx = 0;
+            for (int index = worker_tasklist_len - 1; index >= lower_cpy_idx; index--){
+                threadData* data = malloc(sizeof(threadData));
+                if (!data){
+                    printf("Failed to allocate memory to store worker data.\n");
+                    exit(1);
+                }
+
+                data->context = worker_tasklist[index].context;
+                data->target_token = worker_tasklist[index].target;
+
+                Thread thread;
+                worker_threads_len++;
+                worker_threads = realloc(worker_threads, worker_threads_len * sizeof(Thread));
+                if (!worker_threads){
+                    printf("Failed to allocate memory to store worker threads.\n");
+                    exit(1);
+                }
+                thread_start(workerThread, data, thread);
+                worker_threads[worker_write_idx] = thread;
+
+                worker_write_idx++;
+            }
+
+            worker_write_idx = 0;
+            for (int index = worker_tasklist_len - 1; index >= lower_cpy_idx; index--){
+                train_step_ret* rets = 0;
+                thread_join(worker_threads[worker_write_idx], &rets);
+
+                worker_gradients[previous_worker_gradients_len + worker_write_idx] = rets;
+                worker_write_idx++;
+            }
+
+            for (int index = 0; index < worker_gradients_len; index++){
+                if (!worker_gradients[index]){
+                    continue;
+                }
+                if (!worker_gradients[index]->success){
+                    continue;
+                }
+                loss_sum += worker_gradients[index]->initial_loss;
+                loss_n++;
+            }
+
+            free(worker_threads);
+            worker_threads = NULL;
+            worker_threads_len = 0;
+
+            worker_tasklist_len -= amountToCpy;
+            worker_tasklist = realloc(worker_tasklist, worker_tasklist_len * sizeof(worker_task));
+            if (!worker_tasklist && worker_tasklist_len > 0){
+                printf("Failed to allocate memory to store worker tasklist.\n");
+                exit(1);
+            }
+
+            // Apply and free gradients after each batch
+            apply_worker_gradients();
+        }
+
+        return loss_sum / (float)(loss_n);
+    }
+
+    float flush_worker_tasklist_if_required(){
+        if (worker_tasklist_len >= batchSize){
+            return flush_worker_tasklist();
+        }
+        else{
+            return -1;
+        }
+    }
+
+    volatile sig_atomic_t got_sigint = 0;
+    volatile long long last_ctrl_c = 0;
+
+    void handle_sigint(int sig) {
+        if ((time_ms() - last_ctrl_c > 300) && (got_sigint == 1)){
+            got_sigint = 0;
+            write(STDOUT_FILENO, "\n(Press ctrl + c again to exit)\n", strlen("\n(Press ctrl + c again to exit)\n"));
+            return;
+        }
+
+        if (got_sigint){
+            exit(130);
+        }
+
+        write(STDOUT_FILENO, "\n(Press ctrl + c again to exit)\n", strlen("\n(Press ctrl + c again to exit)\n"));
+        got_sigint = 1;
+
+        last_ctrl_c = time_ms();
+    }
+
+    struct sigaction sa;
+    sa.sa_handler = handle_sigint;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
+
+    sigaction(SIGINT, &sa, NULL);
+
+    bool training_interactive_cli(float current_loss, float* loss_history, size_t loss_history_len, int current_epoch, int total_epochs){
+        printf("\n-----------------------------------------------------\n");
+        printf("Training checkpoint - Epoch %d/%d\n", current_epoch, total_epochs);
+        printf("Current loss: %.6f\n", current_loss);
+        if (loss_history_len > 0){
+            float best_loss = loss_history[0];
+            int start = (loss_history_len > 5) ? loss_history_len - 5 : 0;
+            printf("Loss history (last 5): ");
+            
+            for (int i = 0; i < loss_history_len; i++){
+                if (loss_history[i] < best_loss){
+                    best_loss = loss_history[i];
+                }
+                if (i >= start){
+                    printf("%.6f ", loss_history[i]);
+                }
+            }
+            printf("\nBest loss: %.6f\n", best_loss);
+        }
+        printf("Commands:\n");
+        printf("  /continue                  -- Continue training.\n");
+        printf("  /stop                      -- Stop training.\n");
+        printf("  /save <filename>           -- Save model checkpoint.\n");
+        printf("  /temperature [temperature] -- Display/set current temperature.\n");
+        printf("  /learningRate [lr]         -- Display/set current learning rate.\n");
+        printf("\n");
+
+        float temp = 0.0f;
+        bool use_multiline = false;
+        
+        char* context = malloc(strlen("<|bos|>\nSystem: ") + 1);
+        if (!context){
+            printf("Failed to allocate memory to setup checkpoint CLI.\n");
+            return false;
+        }
+        strcpy(context, "<|bos|>\nSystem: ");
+        size_t context_len = strlen("<|bos|>\nSystem: ");
+        
+        while (true){
+            printf("\nYou:\n");
+            char* input_to_inference = use_multiline ? input_multiline("› ") : input("› ");
+            if (!input_to_inference){
+                printf("Failed to read user input.\n");
+                return false;
+            }
+
+            size_t input_to_inference_len = strlen(input_to_inference);
+            if (strcmp(input_to_inference, "/continue") == 0){
+                free(input_to_inference);
+                free(context);
+                return false;
+            }
+            else if (strcmp(input_to_inference, "/stop") == 0){
+                free(input_to_inference);
+                free(context);
+                return true;
+            }
+            else{
+                if (input_to_inference_len >= strlen("/save x")){
+                    char charaftersave = input_to_inference[strlen("/save ")];
+                    input_to_inference[strlen("/save ")] = '\0';
+                    if (strcmp(input_to_inference, "/save ") == 0){
+                        input_to_inference[strlen("/save ")] = charaftersave;
+                        char* newptr = input_to_inference + strlen("/save ");
+                        save(newptr);
+                        printf("Saved model as '%s'\n", newptr);
+                        free(input_to_inference);
+                        continue;
+                    }
+                    else{
+                        if (input_to_inference_len >= strlen("/temperature x")){
+                            input_to_inference[strlen("/save ")] = charaftersave;
+                            charaftersave = input_to_inference[strlen("/temperature ")];
+                            input_to_inference[strlen("/temperature ")] = '\0';
+                            if (strcmp(input_to_inference, "/temperature ") == 0){
+                                input_to_inference[strlen("/temperature ")] = charaftersave;
+                                char* newptr = input_to_inference + strlen("/temperature ");
+                                float ntemp = (float)(atof(newptr));
+                                if (ntemp < 0){
+                                    printf("Invalid temperature, must be float >=0.\n");
+                                    free(input_to_inference);
+                                    continue;
+                                }
+                                temp = ntemp;
+                                printf("Temperature now set to %f.\n", temp);
+                                free(input_to_inference);
+                                continue;
+                            }
+                            else{
+                                input_to_inference[strlen("/temperature ")] = charaftersave;
+                                goto checkpoint_generate_turn;
+                            }
+                        }
+                        else if (input_to_inference_len >= strlen("/learningRate x")){
+                            input_to_inference[strlen("/save ")] = charaftersave;
+                            charaftersave = input_to_inference[strlen("/learningRate ")];
+                            input_to_inference[strlen("/learningRate ")] = '\0';
+                            if (strcmp(input_to_inference, "/learningRate ") == 0){
+                                input_to_inference[strlen("/learningRate ")] = charaftersave;
+                                char* newptr = input_to_inference + strlen("/learningRate ");
+                                double nlr = atof(newptr);
+                                if (nlr < 0){
+                                    printf("Invalid learning rate, must be >= 0.\n");
+                                    free(input_to_inference);
+                                    continue;
+                                }
+                                learningRate = nlr;
+                                printf("Learning rate now set to %f.\n", learningRate);
+                                free(input_to_inference);
+                                continue;
+                            }
+                            else{
+                                input_to_inference[strlen("/learningRate ")] = charaftersave;
+                                goto checkpoint_generate_turn;
+                            }
+                        }
+                        else{
+                            input_to_inference[strlen("/save ")] = charaftersave;
+                            if (strcmp(input_to_inference, "/temperature") == 0){
+                                printf("Current temperature: %.2f\n", temp);
+                                printf("You can also specify a new temperature like this:\n");
+                                printf("  /temperature <new_temperature>\n");
+                                free(input_to_inference);
+                                continue;
+                            }
+                            else if (strcmp(input_to_inference, "/learningRate") == 0){
+                                printf("Current learning rate: %f\n", learningRate);
+                                printf("You can also specify a new learning rate like this:\n");
+                                printf("  /learningRate <new_learning_rate>\n");
+                                free(input_to_inference);
+                                continue;
+                            }
+                            else{
+                                goto checkpoint_generate_turn;
+                            }
+                        }
+                    }
+                }
+                else{
+                    if (strcmp(input_to_inference, "/save") == 0){
+                        printf("You need to provide a filename with /save.\n");
+                        printf("Usage: /save <filename>\n");
+                        printf("(With <filename> being any valid filename)\n");
+                        free(input_to_inference);
+                        continue;
+                    }
+                    else if (strcmp(input_to_inference, "/temperature") == 0){
+                        printf("Current temperature: %.2f\n", temp);
+                        printf("You can also specify a new temperature like this:\n");
+                        printf("  /temperature <new_temperature>\n");
+                        free(input_to_inference);
+                        continue;
+                    }
+                    else if (strcmp(input_to_inference, "/learningRate") == 0){
+                        printf("Current learning rate: %f\n", learningRate);
+                        printf("You can also specify a new learning rate like this:\n");
+                        printf("  /learningRate <new_learning_rate>\n");
+                        free(input_to_inference);
+                        continue;
+                    }
+                    else{
+                        goto checkpoint_generate_turn;
+                    }
+                }
+            }
+
+        checkpoint_generate_turn:
+            context = realloc(context, context_len + input_to_inference_len + strlen("\n\nPerson:\n\nYou:\n") + 1);
+            if (!context){
+                printf("Failed to allocate memory to track chat context.\n");
+                return false;
+            }
+            context_len += input_to_inference_len + strlen("\n\nPerson:\n\nYou:\n");
+            strcat(context, "\n\nPerson:\n");
+            strcat(context, input_to_inference);
+            strcat(context, "\nYou:\n");
+
+            printf("Model:\n");
+            long long generate_timer = timer();
+            size_t token_n = 0;
+            while (true){
+                if (token_n + 1 > maxOutputSize){
+                    printf("[Reached max output size]\n");
+                    break;
+                }
+                if (token_n > contextSize){
+                    printf("[Context full]\n");
+                    break;
+                }
+                infret rets = inference(context, false, temp, false);
+                if (!rets.success){
+                    printf("[Inference failure]\n");
+                    break;
+                }
+                token_n++;
+                int predicted_token_id = rets.predicted_token_id;
+                char* predicted_token = id_to_token(predicted_token_id);
+                bool eos = false;
+                if (strcmp(predicted_token, "<|eos|>") == 0){
+                    eos = true;
+                    goto after_inference_testloop_print;
+                }
+
+                printf("%s", predicted_token);
+                fflush(stdout);
+                
+            after_inference_testloop_print:
+                context_len += strlen(predicted_token);
+                context = realloc(context, context_len + 1);
+                if (!context){
+                    printf("Failed to allocate memory to track chat context.\n");
+                    return false;
+                }
+                strcat(context, predicted_token);
+                if (eos){
+                    break;
+                }
+            }
+            long long timerresult = timer_end(generate_timer);
+            free(input_to_inference);
+            float tok_per_s = 0;
+            if (timerresult > 0){
+                tok_per_s = 1000 * (float)(token_n) / (float)(timerresult);
+            }
+            printf("(Generated in %lldms, %d tokens, %.2f tok/sec avr.)\n", timerresult, token_n, tok_per_s);
+        }
+    }
+
+    void train(int epochAmount){
+    long long train_timer = timer();
+    printf("Starting training...\n");
+    
+    float* loss_history = NULL;
+    size_t loss_history_len = 0;
+
+    for (int epoch = 0; epoch < epochAmount; epoch++){
+        float loss_sum = 0;
+        size_t loss_n = 0;
+        long long epoch_timer = timer();
+        printf("Starting epoch %d/%d...\n", epoch + 1, epochAmount);
+        for (int dataset = 0; dataset < training_dataset_paths_len; dataset++){
+            long long dataset_timer = timer();
+            printf("Training using dataset %d/%d...\n", dataset + 1, training_dataset_paths_len);
+
+            long long dataset_read_timer = timer();
+            printf("Reading dataset...\n");
+            char* dataset_file = read_file(training_dataset_paths[dataset]);
+            if (!dataset_file){
+                printf("Failed to read dataset in %lldms.\n", timer_end(dataset_read_timer));
+                exit(1);
+            }
+            printf("Read dataset in %lldms.\n", timer_end(dataset_read_timer));
+
+            long long dataset_parse_timer = timer();
+            printf("Parsing dataset...\n");
+            cJSON* dataset_raw = cJSON_Parse(dataset_file);
+            if (!dataset_raw){
+                printf("Failed to parse dataset in %lldms. Common reasons are: dataset contains invalid json.\n", timer_end(dataset_parse_timer));
+                exit(1);
+            }
+            free(dataset_file);
+            printf("Parsed dataset in %lldms.\n", timer_end(dataset_parse_timer));
+
+            long long dataset_preprocess_timer = timer();
+            printf("Preprocessing dataset...\n");
+            int** dataset_token_sequences = NULL;
+            size_t* dataset_token_sequences_lens = NULL;
+            size_t dataset_token_sequences_len = 0;
+            bool** token_masks = NULL;
+            size_t* token_masks_lens = NULL;
+
+            if (!cJSON_IsArray(dataset_raw)){
+            dataset_structure_fail:
+                printf("Dataset structure is invalid. (failed dataset preprocess in %lldms)\n", timer_end(dataset_preprocess_timer));
+                exit(1);
+            }
+            
+            dataset_token_sequences_len = cJSON_GetArraySize(dataset_raw);
+            dataset_token_sequences = calloc(dataset_token_sequences_len * sizeof(int*), 1);
+            token_masks = calloc(dataset_token_sequences_len * sizeof(bool*), 1);
+
+            if ((!dataset_token_sequences) || (!token_masks)){
+            dataset_failed_alloc:
+                printf("Failed to allocate memory to preprocess dataset in %lldms.\n", timer_end(dataset_preprocess_timer));
+                exit(1);
+            }
+
+            dataset_token_sequences_lens = calloc(dataset_token_sequences_len * sizeof(size_t), 1);
+            token_masks_lens = calloc(dataset_token_sequences_len * sizeof(size_t), 1);
+            if ((!dataset_token_sequences_lens) || (!token_masks_lens)){
+                goto dataset_failed_alloc;
+            }
+
+            cJSON* item_raw = dataset_raw->child;
+            for (int index = 0; index < dataset_token_sequences_len; index++){
+                if (!cJSON_IsObject(item_raw)){
+                    goto dataset_structure_fail;
+                }
+
+                cJSON* item_system_prompt_raw = cJSON_GetObjectItem(item_raw, "system_prompt");
+                if (!item_system_prompt_raw){
+                    goto dataset_structure_fail;
+                }
+                if (!cJSON_IsString(item_system_prompt_raw)){
+                    goto dataset_structure_fail;
+                }
+                
+                dataset_token_sequences[index] = NULL;
+                dataset_token_sequences_lens[index] = 0;
+                token_masks[index] = NULL;
+                token_masks_lens[index] = 0;
+
+                char* system_segment = malloc(strlen("<|bos|>\nSystem: ") + strlen(item_system_prompt_raw->valuestring) + 1);
+                if (!system_segment){
+                    goto dataset_failed_alloc;
+                }
+                strcpy(system_segment, "<|bos|>\nSystem: ");
+                strcat(system_segment, item_system_prompt_raw->valuestring);
+
+                tokenize_ret system_tokens = tokenize(system_segment);
+                free(system_segment);
+
+                dataset_token_sequences[index] = malloc(system_tokens.seq_len * sizeof(int));
+                if (!dataset_token_sequences[index]){
+                    free_tokenize_ret(system_tokens);
+                    goto dataset_failed_alloc;
+                }
+                memcpy(dataset_token_sequences[index], system_tokens.tokens, system_tokens.seq_len * sizeof(int));
+                dataset_token_sequences_lens[index] = system_tokens.seq_len;
+
+                token_masks[index] = malloc(system_tokens.seq_len * sizeof(bool));
+                if (!token_masks[index]){
+                    free_tokenize_ret(system_tokens);
+                    goto dataset_failed_alloc;
+                }
+                memset(token_masks[index], false, system_tokens.seq_len);
+                token_masks_lens[index] = system_tokens.seq_len;
+
+                free_tokenize_ret(system_tokens);
+
+                cJSON* turns_raw = cJSON_GetObjectItem(item_raw, "turns");
+                if (!turns_raw){
+                    goto dataset_structure_fail;
+                }
+                if (!cJSON_IsArray(turns_raw)){
+                    goto dataset_structure_fail;
+                }
+
+                size_t turns_len = cJSON_GetArraySize(turns_raw);
+                cJSON* turn_raw = turns_raw->child;
+                for (int subindex = 0; subindex < turns_len; subindex++){
+                    if (!cJSON_IsObject(turn_raw)){
+                        goto dataset_structure_fail;
+                    }
+
+                    cJSON* turn_person = cJSON_GetObjectItem(turn_raw, "person");
+                    cJSON* turn_model = cJSON_GetObjectItem(turn_raw, "model");
+                    if ((!turn_person) || (!turn_model)){
+                        goto dataset_structure_fail;
+                    }
+                    if ((!cJSON_IsString(turn_person)) || (!cJSON_IsString(turn_model))){
+                        goto dataset_structure_fail;
+                    }
+
+                    char* context_segment = malloc(strlen("\n\nPerson:\n") + strlen(turn_person->valuestring) + strlen("\nYou:\n") + 1);
+                    if (!context_segment){
+                        goto dataset_failed_alloc;
+                    }
+                    strcpy(context_segment, "\n\nPerson:\n");
+                    strcat(context_segment, turn_person->valuestring);
+                    strcat(context_segment, "\nYou:\n");
+
+                    tokenize_ret context_tokens = tokenize(context_segment);
+                    free(context_segment);
+
+                    size_t old_len = dataset_token_sequences_lens[index];
+                    dataset_token_sequences[index] = realloc(dataset_token_sequences[index], (old_len + context_tokens.seq_len) * sizeof(int));
+                    if (!dataset_token_sequences[index]){
+                        free_tokenize_ret(context_tokens);
+                        goto dataset_failed_alloc;
+                    }
+                    memcpy(dataset_token_sequences[index] + old_len, context_tokens.tokens, context_tokens.seq_len * sizeof(int));
+
+                    size_t old_mask_len = token_masks_lens[index];
+                    token_masks[index] = realloc(token_masks[index], (old_mask_len + context_tokens.seq_len) * sizeof(bool));
+                    if (!token_masks[index]){
+                        free_tokenize_ret(context_tokens);
+                        goto dataset_failed_alloc;
+                    }
+                    memset(token_masks[index] + old_mask_len, false, context_tokens.seq_len);
+
+                    dataset_token_sequences_lens[index] = old_len + context_tokens.seq_len;
+                    token_masks_lens[index] = old_mask_len + context_tokens.seq_len;
+                    free_tokenize_ret(context_tokens);
+
+                    tokenize_ret response_tokens = tokenize(turn_model->valuestring);
+
+                    old_len = dataset_token_sequences_lens[index];
+                    dataset_token_sequences[index] = realloc(dataset_token_sequences[index], (old_len + response_tokens.seq_len) * sizeof(int));
+                    if (!dataset_token_sequences[index]){
+                        free_tokenize_ret(response_tokens);
+                        goto dataset_failed_alloc;
+                    }
+                    memcpy(dataset_token_sequences[index] + old_len, response_tokens.tokens, response_tokens.seq_len * sizeof(int));
+
+                    old_mask_len = token_masks_lens[index];
+                    token_masks[index] = realloc(token_masks[index], (old_mask_len + response_tokens.seq_len) * sizeof(bool));
+                    if (!token_masks[index]){
+                        free_tokenize_ret(response_tokens);
+                        goto dataset_failed_alloc;
+                    }
+                    memset(token_masks[index] + old_mask_len, true, response_tokens.seq_len);
+
+                    dataset_token_sequences_lens[index] = old_len + response_tokens.seq_len;
+                    token_masks_lens[index] = old_mask_len + response_tokens.seq_len;
+                    free_tokenize_ret(response_tokens);
+
+                    int eos_token_id = token_to_id("<|eos|>");
+                    old_len = dataset_token_sequences_lens[index];
+                    dataset_token_sequences[index] = realloc(dataset_token_sequences[index], (old_len + 1) * sizeof(int));
+                    if (!dataset_token_sequences[index]){
+                        goto dataset_failed_alloc;
+                    }
+                    dataset_token_sequences[index][old_len] = eos_token_id;
+                    dataset_token_sequences_lens[index] = old_len + 1;
+
+                    old_mask_len = token_masks_lens[index];
+                    token_masks[index] = realloc(token_masks[index], (old_mask_len + 1) * sizeof(bool));
+                    if (!token_masks[index]){
+                        goto dataset_failed_alloc;
+                    }
+                    token_masks[index][old_mask_len] = true;
+                    token_masks_lens[index] = old_mask_len + 1;
+
+                    turn_raw = turn_raw->next;
+                }
+                
+                printf("=== DEBUG: Entry %d ===\n", index);
+                for (int dbg = 0; dbg < dataset_token_sequences_lens[index]; dbg++){
+                    char* tok_str = id_to_token(dataset_token_sequences[index][dbg]);
+                    printf("[%d|%s|%c] ", dataset_token_sequences[index][dbg], tok_str ? tok_str : "NULL", token_masks[index][dbg] ? 'T' : 'F');
+                }
+                printf("\n=== END DEBUG ===\n");
+
+                item_raw = item_raw->next;
+            }
+
+            cJSON_Delete(dataset_raw);
+
+            printf("Preprocessed dataset in %lldms.\n", timer_end(dataset_preprocess_timer));
+            
+            long long dataset_count_tokens_timer = timer();
+            printf("Counting tokens in dataset...\n");
+            size_t total_tokens = 0;
+            size_t total_entries = dataset_token_sequences_len;
+            for (int index = 0; index < total_entries; index++){
+                total_tokens += dataset_token_sequences_lens[index];
+            }
+
+            double avr_tokens_per_entry = (total_entries > 0) ? (double)(total_tokens) / (double)(total_entries) : 0.0f;
+            printf("%zu tokens in dataset, %.2f tok/dataset entry avr. (counted in %lldms)\n", total_tokens, avr_tokens_per_entry, timer_end(dataset_count_tokens_timer));
+
+            for (int index = 0; index < total_entries; index++){
+                long long entry_timer = timer();
+                printf("Training on entry %d/%d...\n", index + 1, total_entries);
+                int* entry_tokens = dataset_token_sequences[index];
+                size_t entry_tokens_len = dataset_token_sequences_lens[index];
+                bool* entry_mask = token_masks[index];
+                size_t entry_mask_len = token_masks_lens[index];
+                if (entry_mask_len != entry_tokens_len){
+                    printf("[Dataset] Token count mismatch on entry %d: mask_len=%zu, token_len=%zu. Aborting to avoid OOB.\n", index, entry_mask_len, entry_tokens_len);
+                    exit(1);
+                }
+
+                char* context = calloc(1, 1);
+                size_t context_len = 0;
+
+                for (int pos = 0; pos < entry_mask_len; pos++){
+                    if (!entry_mask[pos]){
+                        int tok_id = entry_tokens[pos];
+                        if (tok_id < 0 || tok_id >= vocab_len){
+                            printf("HEAP CORRUPTION DETECTED: token_id=%d out of range [0, %d)\n", tok_id, vocab_len);
+                            exit(1);
+                        }
+                        char* curr_token = id_to_token(tok_id);
+                        if (!curr_token){
+                            printf("HEAP CORRUPTION DETECTED: id_to_token(%d) returned NULL\n", tok_id);
+                            exit(1);
+                        }
+                        size_t curr_token_len = strlen(curr_token);
+                        context_len += curr_token_len;
+                        context = realloc(context, context_len + 1);
+                        if (!context){
+                        training_context_failed_alloc:
+                            printf("Failed to allocate memory to process training context.\n");
+                            exit(1);
+                        }
+                        strcat(context, curr_token);
+                    }
+                    else{
+                        train_step_token target = {0};
+                        target.token = id_to_token(entry_tokens[pos]);
+                        target.token_id = entry_tokens[pos];
+                        add_to_worker_tasklist(strdup(context), target);
+                        
+                        context_len += strlen(target.token);
+                        context = realloc(context, context_len + 1);
+                        if (!context){
+                            goto training_context_failed_alloc;
+                        }
+                        strcat(context, target.token);
+                    }
+
+                    
+                    int debug_tok = dataset_token_sequences[0][0];
+                    if (debug_tok < 0 || debug_tok >= vocab_len){
+                        printf("CORRUPTION BEFORE flush: token[0]=%d\n", debug_tok);
+                        exit(1);
+                    }
+
+                    float loss_sum_add = flush_worker_tasklist_if_required();
+
+                    debug_tok = dataset_token_sequences[0][0];
+                    if (debug_tok < 0 || debug_tok >= vocab_len){
+                        printf("CORRUPTION AFTER flush: token[0]=%d\n", debug_tok);
+                        exit(1);
+                    }
+
+                    if (loss_sum_add != -1){
+                        loss_sum += loss_sum_add;
+                        loss_n++;
+                    }
+                }
+                free(context);
+                printf("Trained on entry %d/%d in %lldms.\n", index + 1, total_entries, timer_end(entry_timer));
+            }
+
+            for (int index = 0; index < total_entries; index++){
+                free(dataset_token_sequences[index]);
+                free(token_masks[index]);
+            }
+            free(dataset_token_sequences);
+            free(dataset_token_sequences_lens);
+            free(token_masks);
+            free(token_masks_lens);
+            printf("Trained using dataset %d/%d in %lldms.\n", dataset + 1, training_dataset_paths_len, timer_end(dataset_timer));
+        }
+        float loss_avr = loss_sum / (float)(loss_n);
+        loss_history_len++;
+        loss_history = realloc(loss_history, loss_history_len * sizeof(float));
+        if (!loss_history){
+            printf("Failed to allocate memory to track loss history.\n");
+            exit(1);
+        }
+        loss_history[loss_history_len - 1] = loss_avr;
+        printf("Finished epoch %d/%d in %lldms.\n", epoch + 1, epochAmount, timer_end(epoch_timer));
+
+        char* checkpoint_response = input_with_timeout("Do you want to open checkpoint cli? (30 seconds to answer): ", 30000);
+        if (checkpoint_response){
+            free(checkpoint_response);
+            bool should_stop = training_interactive_cli(loss_avr, loss_history, loss_history_len, epoch + 1, epochAmount);
+            if (should_stop){
+                break;
+            }
+        }
+    }
+    printf("Finished training for %d epochs in %lldms.\n", epochAmount, timer_end(train_timer));
+    return;
+}
+    if (do_train) {
+        train(train_epochs);
     }
 
     printf("\n-----------------------------------------------------\n");
     printf("Chat with the model (inference, default temp is 0.7):\n");
     float temp = 0.7;
-    printf("(Type '/exit' to exit, '/save <filename>' to save the model or '/temperature <new_temperature> to change the temperature)\n");
-    char* context = malloc(strlen("<|bos|>") + 1);
+    printf("Commands:\n");
+    printf("  /exit                      -- Exit the cli.\n");
+    printf("  /save <filename>           -- Save model.\n");
+    printf("  /temperature [temperature] -- Display/set current temperature.\n");
+    printf("\n");
+    printf("Do you want to enable multiline inputs? This will allow you to send messages multiple lines long, however as enter will be used to create a new line, you will have to use ctrl + d twice to send your message/command instead of just pressing enter.\n");
+    char* multilineornot = NULL;
+    bool use_multiline = false;
+    while (true){
+        multilineornot = input("Enable multiline inputs? (y/n) ");
+        if (!multilineornot){
+            printf("Failed to read user input.\n");
+            return 1;
+        }
+
+        if (strcmp(multilineornot, "y") == 0){
+            printf("Enabled multiline inputs.\n");
+            printf("\n");
+            free(multilineornot);
+            multilineornot = NULL;
+            use_multiline = true;
+            break;
+        }
+        else{
+            if (strcmp(multilineornot, "n") == 0){
+                printf("Disabled multiline inputs.\n");
+                printf("\n");
+                free(multilineornot);
+                multilineornot = NULL;
+                use_multiline = false;
+                break;
+            }
+            else{
+                printf("Invalid input, type 'y' for yes or 'n' for no.\n");
+                free(multilineornot);
+                multilineornot = NULL;
+                continue;
+            }
+        }
+    }
+
+    char* context = malloc(strlen("<|bos|>\nSystem: ") + 1);
     if (!context){
         printf("Failed to allocate memory to setup model chat interface.\n");
         return 1;
     }
-    strcpy(context, "<|bos|>");
-    size_t context_len = strlen("<|bos|>");
+    strcpy(context, "<|bos|>\nSystem: ");
+    size_t context_len = strlen("<|bos|>\nSystem: ");
     while (true){
         printf("\nYou:\n");
-        char* input_to_inference = input("› ");
+        char* input_to_inference = use_multiline ? input_multiline("› ") : input("› ");
         if (!input_to_inference){
             printf("Failed to read user input.\n");
             return 1;
@@ -5226,9 +6420,10 @@ after_config_parse:
                     else{
                         input_to_inference[strlen("/save ")] = charaftersave;
                         if (strcmp(input_to_inference, "/temperature") == 0){
-                            printf("You need to provide a new temperature with /temperature.\n");
-                            printf("Usage: /temperature <new_temperature>\n");
-                            printf("(With <new_temperature> being a float >=0)\n");
+                            printf("Current temperature: %.2f\n", temp);
+                            printf("\n");
+                            printf("You can also specify a new temperature like this:\n");
+                            printf("  /temperature <new_temperature>\n");
                             free(input_to_inference);
                             continue;
                         }
@@ -5283,7 +6478,13 @@ after_config_parse:
             token_n++;
             int predicted_token_id = rets.predicted_token_id;
             char* predicted_token = id_to_token(predicted_token_id);
+            bool eos = false;
+            if (strcmp(predicted_token, "<|eos|>") == 0){
+                eos = true;
+                goto after_inference_print;
+            }
 
+        after_inference_print:
             printf("%s", predicted_token);
             fflush(stdout);
 
@@ -5293,6 +6494,11 @@ after_config_parse:
                 printf("Failed to allocate memory to track chat context.\n");
                 return 1;
             }
+
+            if (eos){
+                break;
+            }
+
             strcat(context, predicted_token);
         }
         long long timerresult = timer_end(generate_timer);

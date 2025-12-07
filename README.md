@@ -1,4 +1,4 @@
-# Cleanai-c in-dev 0.0.12
+# Cleanai-c in-dev 0.0.13
 
 ## What's this?
 I'm the guy that made <a href="https://github.com/willmil11/cleanai">cleanai</a> which is basically javascript pytorch made from scratch with no machine learning librairies. Except I originally made that one as a python library then translated it to js for speed then added a cli arround it etc. It is very unclean and pretty slow, therefore I decided to make this version in c with better design choices.
@@ -33,6 +33,7 @@ gcc -O3 -march=native -ffast-math cleanai.c -o cleanai -lm
 (You need gcc installed. This code can only be compiled with gcc because it uses gcc only things like nested functions. You can still compile for windows tho because there are builds of gcc that work on windows. You can also cross compile if you remove "-march=native" from your command and use a cross compiler.)
 
 ## Version history
+- in-dev 0.0.13: Training is sort of working but there are many bugs that I'm fixing.
 - in-dev 0.0.12: Optimized code.
 - in-dev 0.0.11: Small improvements.
 - in-dev 0.0.10: Overall a lot of fixes, improved model architecture, new inference chat interface, better config, better vocabulary, etc...

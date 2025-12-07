@@ -1,32 +1,19 @@
 [
     {
-        "system_prompt": ""
-        "inputs": ["Hey!"],
-        "outputs": ["Hey, how are you?"]
-    },
-    {
-        "system_prompt": ""
-        "inputs": ["Hey there!"],
-        "outputs": ["Hey there, how are you?"]
-    },
-    {
-        "system_prompt": ""
-        "inputs": ["Hey man!"],
-        "outputs": ["Hey man, how are you?"]
-    },
-    {
-        "system_prompt": ""
-        "inputs": ["Hey friend!"],
-        "outputs": ["Hey friend, how are you?"]
-    },
-    {
-        "system_prompt": ""
-        "inputs": ["Hey stranger!"],
-        "outputs": ["Hey stranger, how are you?"]
-    },
-    {
-        "system_prompt": ""
-        "inputs": ["Hey you!"],
-        "outputs": ["Hey you, how are you?"]
+        "system_prompt": "",
+        "turns": [
+            {
+                "person": "Hey!",
+                "model": "Hey, how are you?"
+            },
+            {
+                "person": "I am good, what about you?",
+                "model": "I am good too, have a nice day :)"
+            },
+            {
+                "person": "You too, take care!",
+                "model": "Thanks!"
+            }
+        ]
     }
 ]
