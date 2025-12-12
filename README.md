@@ -10,7 +10,7 @@ I am willmil11, a 15 year old french self taught dev.
 I tought about how cleanai's codebase is pure hot steaming garbage and decided to remake it but in C.
 
 ## How long have you been working on this?
-I've been working on the <a href="https://github.com/willmil11/cleanai">original cleanai repo</a> since a very long time, however I've only been working on this one since a month or two I think.
+I've been working on the <a href="https://github.com/willmil11/cleanai">original cleanai repo</a> for almost 11 months (although realistically I stopped working on it since 6 months ago so more like 5 months). And I've been working on this repo you're on right now for about 4 months.
 
 ## How to use?
 <strong>Automatic way</strong>
@@ -19,7 +19,7 @@ Make sure you have the fish shell installed, then just:
 ```bash
 fish compile.fish help
 ```
-And normally the script will display an easy to understand help message, the script is actually super super simple to use so just run the help command like I showed you and you'll understand pretty much imediately.
+And normally the script will display an easy to understand help message, the script is actually super super simple to use so just run the help command like I showed you and you'll understand pretty much immediately.
 <br>
 <i>Note: script requires gcc and fish shell, obviously.</i>
 <br>
@@ -28,7 +28,7 @@ And normally the script will display an easy to understand help message, the scr
 <br>
 You can compile the code manually with
 ```bash
-gcc -O3 -march=native -ffast-math cleanai.c -o cleanai -lm
+gcc -O3 -march=native -ffast-math cleanai.c -o cleanai -lm -pthread
 ```
 (You need gcc installed. This code can only be compiled with gcc because it uses gcc only things like nested functions. You can still compile for windows tho because there are builds of gcc that work on windows. You can also cross compile if you remove "-march=native" from your command and use a cross compiler.)
 
