@@ -14,6 +14,12 @@
 #include "libs/miniz.h"
 #include "libs/miniz.c"
 
+//Customisation
+#define eta_pause_toggle true //Eta will pause program for eta_pause_time_ms for you to see eta
+#define eta_pause_time_ms 1000 //Time to pause
+#define eta_pause_every_n_batch 3 //pause every n batch
+//End Customisation
+
 float lr_plateau_best_loss = __FLT_MAX__;
 int lr_plateau_counter = 0;
 
@@ -296,6 +302,7 @@ void help(char* issue){
     printf("                                                                          [--pretrain]\n");
     printf("                                                              [--pretrain]\n");
     printf("                                                                          [--train]\n");
+    printf("        --init-config path/to/new/config.json\n");
     printf("\n");
     printf("Note: Arguments between square brackets ([...]) are optional.\n");
 }
@@ -338,6 +345,19 @@ char* read_file(const char* path) {
 
     buffer[size] = '\0'; // null-terminate for safety
     return buffer;
+}
+
+bool file_write(char* path, char* content) {
+    FILE* file = fopen(path, "w");
+    if (!file) {
+        return false;
+    }
+    
+    size_t len = strlen(content);
+    size_t written = fwrite(content, 1, len, file);
+    fclose(file);
+    
+    return written == len;
 }
 
 #ifdef _WIN32
@@ -562,6 +582,557 @@ int main(int argc, char** argv){
     argc--;
 
     //parse arguments
+    if (argc == 1){
+        char* arg = argv[0];
+        if (strcmp(arg, "--init-config") == 0){
+            help("You need to specify a path to create the new config file with --init-config.");
+            return 1;
+        }
+    }
+    if (argc == 2){
+        char* arg_a = argv[0];
+        char* arg_b = argv[1];
+        if (strcmp(arg_a, "--init-config") == 0){
+            printf("Arguments parsed successfully :)\n");
+            
+        init_config_file_exists_check:
+            if (file_exists(arg_b)){
+                while (true){
+                    char prompt_str[512];
+                    sprintf(prompt_str, "File '%s' already exists, do you want to allow the program to overwrite it? (y/n) ", arg_b);
+                    char* overwrite_prompt = input(prompt_str);
+                    if (!overwrite_prompt){
+                        printf("Failed to read user input.\n");
+                        return 1;
+                    }
+
+                    if (strcmp(overwrite_prompt, "y") == 0){
+                        break;
+                    }
+                    else{
+                        if (strcmp(overwrite_prompt, "n") == 0){
+                            char* new_arg_b = input("Please specify a new file to save as: ");
+                            if (!new_arg_b){
+                                printf("Failed to read user input.\n");
+                                return 1;
+                            }
+                            arg_b = new_arg_b;
+                            free(overwrite_prompt);
+                            goto init_config_file_exists_check;
+                        }
+                        else{
+                            printf("Invalid input.\n");
+                            free(overwrite_prompt);
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            cJSON* new_config = cJSON_CreateObject();
+            printf("--- Model architecture parameters (required) ---\n");
+            
+            int heads_n = 0;
+            printf("Heads is a paremeter that if higher, while costing more compute, allows your model to focus on more different parts of inputs at the same time. Common values range from 2 to 4 for small models, 8 to 16 for medium models and 16-64+ for large models.\n");
+            while (true){
+                char* head_prompt = input("Choose heads (integer, >=1)? ");
+                if (!head_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                heads_n = atoi(head_prompt);
+                free(head_prompt);
+                if (heads_n < 1){
+                    printf("Invalid input, must be an integer >= 1.\n");
+                    continue;
+                }
+
+                cJSON_AddNumberToObject(new_config, "heads", heads_n);
+                break;
+            }
+
+            printf("\n");
+
+            printf("EmbeddingSize is a parameter that if higher, while costing more compute, allows your model to memorize more information. Common values range from 64 to 128 for small models, 256 to 512 for medium models and 1024 to 12768+ for large models.\n");
+            printf("IMPORTANT: embeddingSize must be divisible by heads.\n");
+            int embeddingSize_n = 0;
+            while (true){
+                char prompt_str[256];
+                sprintf(prompt_str, "Choose embeddingSize (integer, >=1, divisible by %d)? ", heads_n);
+                char* embeddingSize_prompt = input(prompt_str);
+                if (!embeddingSize_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                embeddingSize_n = atoi(embeddingSize_prompt);
+                free(embeddingSize_prompt);
+                if ((embeddingSize_n < 1) || ((int)(embeddingSize_n / heads_n) != ((float)(embeddingSize_n) / (float)(heads_n)))){
+                    printf("Invalid input, must be an integer >= 1 and divisible by %d.\n", heads_n);
+                    continue;
+                }
+
+                cJSON_AddNumberToObject(new_config, "embeddingSize", embeddingSize_n);
+                break;
+            }
+
+            printf("\n");
+
+            int layers_n = 0;
+            printf("layersAmount is a parameter that if higher, while costing more compute, allows your model to think through problems in more steps. Common values range from 2 to 4 for small models, 4 to 8 for medium models and 8-32+ for large models.\n");
+            while (true){
+                char *layer_prompt = input("Choose layersAmount (integer, >=1)? ");
+                if (!layer_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                layers_n = atoi(layer_prompt);
+                free(layer_prompt);
+                if (layers_n < 1){
+                    printf("Invalid input, must be an integer >= 1.\n");
+                    continue;
+                }
+                cJSON_AddNumberToObject(new_config, "layersAmount", layers_n);
+                break;
+            }
+
+            printf("\n");
+
+            int ffn_grow_size = 0;
+            printf("ffnGrowSize is a parameter that if higher, while costing more compute, gives your model better implicit reasoning. Common values range from 4 to 8 for small models, 8 to 12 for medium models and 16-64+ for large models.\n");
+            while (true){
+                char *ffn_prompt = input("Choose ffnGrowSize (integer, >=1)? ");
+                if (!ffn_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                ffn_grow_size = atoi(ffn_prompt);
+                free(ffn_prompt);
+                if (ffn_grow_size < 1){
+                    printf("Invalid input, must be an integer >= 1.\n");
+                    continue;
+                }
+                cJSON_AddNumberToObject(new_config, "ffnGrowSize", ffn_grow_size);
+                break;
+            }
+            
+            printf("\n");
+
+            int context_size = 0;
+            printf("contextSize is the maximum amount of tokens the model can process at once. Common values range from 128 to 512 for small models, 2048 to 8192 for medium models and 32768-1000000+ for large models.\n");
+            while (true){
+                char *context_prompt = input("Choose contextSize (integer, >=1)? ");
+                if (!context_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                context_size = atoi(context_prompt);
+                free(context_prompt);
+                if (context_size < 1){
+                    printf("Invalid input, must be an integer >= 1.\n");
+                    continue;
+                }
+                cJSON_AddNumberToObject(new_config, "contextSize", context_size);
+                break;
+            }
+
+            printf("\n");
+
+            int max_output_size = 0;
+            printf("maxOutputSize is the maximum amount of tokens the model can output in one response. Common values range from 16 to 128 for small models, 512 to 4096 for medium models and 16384-65536+ for large models.\n");
+            while (true){
+                char *output_prompt = input("Choose maxOutputSize (integer, >=1)? ");
+                if (!output_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                max_output_size = atoi(output_prompt);
+                free(output_prompt);
+                if (max_output_size < 1){
+                    printf("Invalid input, must be an integer >= 1.\n");
+                    continue;
+                }
+                cJSON_AddNumberToObject(new_config, "maxOutputSize", max_output_size);
+                break;
+            }
+
+            printf("\n");
+
+            void cJSON_AddNumberToArray(cJSON* arr, double n){
+                cJSON_AddItemToArray(arr, cJSON_CreateNumber(n));
+                return;
+            }
+
+            double embedding_start = 0;
+            double embedding_end = 0;
+            printf("embeddinginitrange is the range of random values to initialize embeddings within. Smaller ranges like [-0.01, 0.01] make training more stable but slower, larger ranges like [-0.1, 0.1] make it faster but less stable. Enter start and end values (floats).\n");
+            while (true){
+                char *embedding_start_prompt = input("Choose embeddinginitrange start (float)? ");
+                if (!embedding_start_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                embedding_start = atof(embedding_start_prompt);
+                free(embedding_start_prompt);
+                
+                char *embedding_end_prompt = input("Choose embeddinginitrange end (float)? ");
+                if (!embedding_end_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                embedding_end = atof(embedding_end_prompt);
+                free(embedding_end_prompt);
+                
+                if (embedding_start >= embedding_end){
+                    printf("Invalid input, start must be less than end.\n");
+                    continue;
+                }
+                
+                cJSON* embedding_array = cJSON_CreateArray();
+                cJSON_AddNumberToArray(embedding_array, embedding_start);
+                cJSON_AddNumberToArray(embedding_array, embedding_end);
+                cJSON_AddItemToObject(new_config, "embeddinginitrange", embedding_array);
+                break;
+            }
+
+            printf("\n");
+
+            double bias_start = 0;
+            double bias_end = 0;
+            printf("biasesinitrange is the range of random values to initialize biases within. Smaller ranges like [-0.01, 0.01] make training more stable but slower, larger ranges like [-0.1, 0.1] make it faster but less stable. Enter start and end values (floats).\n");
+            while (true){
+                char *bias_start_prompt = input("Choose biasesinitrange start (float)? ");
+                if (!bias_start_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                bias_start = atof(bias_start_prompt);
+                free(bias_start_prompt);
+                
+                char *bias_end_prompt = input("Choose biasesinitrange end (float)? ");
+                if (!bias_end_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                bias_end = atof(bias_end_prompt);
+                free(bias_end_prompt);
+                
+                if (bias_start >= bias_end){
+                    printf("Invalid input, start must be less than end.\n");
+                    continue;
+                }
+                
+                cJSON* bias_array = cJSON_CreateArray();
+                cJSON_AddNumberToArray(bias_array, bias_start);
+                cJSON_AddNumberToArray(bias_array, bias_end);
+                cJSON_AddItemToObject(new_config, "biasesinitrange", bias_array);
+                break;
+            }
+
+            printf("\n\n");
+
+            bool any_train_param_config_setup = false;
+            printf("Pretraining is training the model on unstructured language like wikipedia dumps where there are no conversations, the goal is to teach the model to predict language in general.\n");
+            while (true){
+                char* pretrain_setup_prompt = input("Do you wish to setup the pretraining parameters of the config? (y/n) ");
+                if (!pretrain_setup_prompt){
+                    printf("Failed to read user input.\n");
+                    return 1;
+                }
+
+                if (strcmp(pretrain_setup_prompt, "y") == 0){
+                    any_train_param_config_setup = true;
+                    break;
+                }
+                else{
+                    if (strcmp(pretrain_setup_prompt, "n") == 0){
+                        goto after_pretrain_config_setup;
+                    }
+                    else{
+                        printf("Invalid input, type 'y' for yes or 'n' for no.\n");
+                        continue;
+                    }
+                }
+            }
+            
+            printf("--- Pretraining config parameters setup ---\n");
+            cJSON* paths_array = cJSON_CreateArray();
+            printf("pre-training-paths are the file paths to your pretraining data. Enter each path one at a time, press enter with no input when done.\n");
+            while (true){
+                char* path = input("Enter pre-training path? ");
+                if (!path || strlen(path) == 0){
+                    free(path);
+                    break;
+                }
+                cJSON_AddItemToArray(paths_array, cJSON_CreateString(path));
+                free(path);
+            }
+            cJSON_AddItemToObject(new_config, "pre-training-paths", paths_array);
+
+            printf("\n");
+
+            int pretrain_epochs = 0;
+            printf("pre-train-epochs is the number of times the program should train on the pretraining data. Higher means more training but takes longer.\n");
+            while (true){
+                char* epoch_prompt = input("Choose pre-train-epochs (integer, >1)? ");
+                if (!epoch_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                pretrain_epochs = atoi(epoch_prompt);
+                free(epoch_prompt);
+                if (pretrain_epochs < 1){
+                    printf("Invalid input, must be an integer > 1.\n");
+                    continue;
+                }
+                cJSON_AddNumberToObject(new_config, "pre-train-epochs", pretrain_epochs);
+                break;
+            }
+
+            printf("\n");
+
+            char* pretrain_optimizer = NULL;
+            printf("pre-train-optimizer is the optimizer used to train the model. Adam is generally best for everything, SGD is older and more granular, sgd_momentum is between both.\n");
+            while (true){
+                char* opt_prompt = input("Choose pre-train-optimizer (adam, sgd, sgd_momentum)? ");
+                if (!opt_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                if (strcmp(opt_prompt, "adam") == 0 || strcmp(opt_prompt, "sgd") == 0 || strcmp(opt_prompt, "sgd_momentum") == 0){
+                    pretrain_optimizer = opt_prompt;
+                    cJSON_AddStringToObject(new_config, "pre-train-optimizer", pretrain_optimizer);
+                    break;
+                } else {
+                    printf("Invalid input, must be adam, sgd, or sgd_momentum.\n");
+                    free(opt_prompt);
+                    continue;
+                }
+            }
+
+            printf("\n\n");
+
+        after_pretrain_config_setup:
+            printf("Training is training the model on structured language like conversational exanges, the goal is to teach the model to use the learned pretraining language skills to reason and comunicate. This requires structured json datasets.\n");
+
+            while (true){
+                char* train_setup_prompt = input("Do you wish to setup the training parameters of the config? (y/n) ");
+                if (!train_setup_prompt){
+                    printf("Failed to read user input.\n");
+                    return 1;
+                }
+
+                if (strcmp(train_setup_prompt, "y") == 0){
+                    any_train_param_config_setup = true;
+                    break;
+                }
+                else{
+                    if (strcmp(train_setup_prompt, "n") == 0){
+                        goto after_train_config_setup;
+                    }
+                    else{
+                        printf("Invalid input, type 'y' for yes or 'n' for no.\n");
+                        continue;
+                    }
+                }
+            }
+
+            printf("--- Training config parameters setup ---\n");
+
+            cJSON* train_paths_array = cJSON_CreateArray();
+            printf("training-dataset-paths are the file paths to your training data. Enter each path one at a time, press enter with no input when done.\n");
+            while (true){
+                char* train_path = input("Enter training-dataset-path? ");
+                if (!train_path || strlen(train_path) == 0){
+                    free(train_path);
+                    break;
+                }
+                cJSON_AddItemToArray(train_paths_array, cJSON_CreateString(train_path));
+                free(train_path);
+            }
+            cJSON_AddItemToObject(new_config, "training-dataset-paths", train_paths_array);
+
+            printf("\n");
+
+            int train_epochs = 0;
+            printf("train-epochs is the number of times the program should train on the training data. Higher means more training but takes longer.\n");
+            while (true){
+                char* train_epoch_prompt = input("Choose train-epochs (integer, >1)? ");
+                if (!train_epoch_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                train_epochs = atoi(train_epoch_prompt);
+                free(train_epoch_prompt);
+                if (train_epochs < 1){
+                    printf("Invalid input, must be an integer > 1.\n");
+                    continue;
+                }
+                cJSON_AddNumberToObject(new_config, "train-epochs", train_epochs);
+                break;
+            }
+
+            printf("\n");
+
+            char* train_optimizer = NULL;
+            printf("train-optimizer is the optimizer used to train the model. Adam is generally best for everything, SGD is older and more granular, sgd_momentum is between both.\n");
+            while (true){
+                char* train_opt_prompt = input("Choose train-optimizer (adam, sgd, sgd_momentum)? ");
+                if (!train_opt_prompt){
+                    printf("Failed to read user input\n");
+                    return 1;
+                }
+                if (strcmp(train_opt_prompt, "adam") == 0 || strcmp(train_opt_prompt, "sgd") == 0 || strcmp(train_opt_prompt, "sgd_momentum") == 0){
+                    train_optimizer = train_opt_prompt;
+                    cJSON_AddStringToObject(new_config, "train-optimizer", train_optimizer);
+                    break;
+                } else {
+                    printf("Invalid input, must be adam, sgd, or sgd_momentum.\n");
+                    free(train_opt_prompt);
+                    continue;
+                }
+            }
+
+        after_train_config_setup:
+            if (any_train_param_config_setup){
+                printf("--- Training parameters applied to both pretraining and training ---\n");
+                double learning_rate = 0;
+                printf("learningRate controls how much the model adjusts its weights each training step. High learning rates learn faster but can skip over important details and make the model regress, while too low can get stuck in mediocrity loops and be slow. Common values range from 0.0001 to 0.01.\n");
+                while (true){
+                    char* lr_prompt = input("Choose learningRate (float)? ");
+                    if (!lr_prompt){
+                        printf("Failed to read user input\n");
+                        return 1;
+                    }
+                    learning_rate = atof(lr_prompt);
+                    free(lr_prompt);
+                    cJSON_AddNumberToObject(new_config, "learningRate", learning_rate);
+                    break;
+                }
+
+                printf("\n");
+
+                double learning_rate_decay = 0;
+                printf("learningRateDecay is a factor that the learning rate is multiplied by when loss has not improved for learningRateDecayPatience epochs. This helps prevent getting stuck and fine-tunes training. Common values range from 0.5 to 0.99.\n");
+                while (true){
+                    char* decay_prompt = input("Choose learningRateDecay (float, 0-1)? ");
+                    if (!decay_prompt){
+                        printf("Failed to read user input\n");
+                        return 1;
+                    }
+                    learning_rate_decay = atof(decay_prompt);
+                    free(decay_prompt);
+                    if (learning_rate_decay <= 0 || learning_rate_decay >= 1){
+                        printf("Invalid input, must be a float between 0 and 1.\n");
+                        continue;
+                    }
+                    cJSON_AddNumberToObject(new_config, "learningRateDecay", learning_rate_decay);
+                    break;
+                }
+
+                printf("\n");
+
+                int learning_rate_decay_patience = 0;
+                printf("learningRateDecayPatience is the number of epochs the loss must not improve before the learning rate is decayed.\n");
+                while (true){
+                    char* patience_prompt = input("Choose learningRateDecayPatience (integer, >=1)? ");
+                    if (!patience_prompt){
+                        printf("Failed to read user input\n");
+                        return 1;
+                    }
+                    learning_rate_decay_patience = atoi(patience_prompt);
+                    free(patience_prompt);
+                    if (learning_rate_decay_patience < 1){
+                        printf("Invalid input, must be an integer >= 1.\n");
+                        continue;
+                    }
+                    cJSON_AddNumberToObject(new_config, "learningRateDecayPatience", learning_rate_decay_patience);
+                    break;
+                }
+
+                printf("\n");
+
+                int batch_size = 0;
+                printf("batchSize is the number of training tasks spawned per batch, with each task running as a thread. Be careful as larger batch sizes mean more parallelism but also more memory usage. Larger batch sizes also mean more averaged and stable training. Common values range from 4 to 64.\n");
+                while (true){
+                    char* batch_prompt = input("Choose batchSize (integer, >=1)? ");
+                    if (!batch_prompt){
+                        printf("Failed to read user input\n");
+                        return 1;
+                    }
+                    batch_size = atoi(batch_prompt);
+                    free(batch_prompt);
+                    if (batch_size < 1){
+                        printf("Invalid input, must be an integer >= 1.\n");
+                        continue;
+                    }
+                    cJSON_AddNumberToObject(new_config, "batchSize", batch_size);
+                    break;
+                }
+
+                printf("\n");
+
+                char* anti_overfitting = NULL;
+                printf("antiOverfittingOptimisations allows the model to have better generalization and avoid learning the data perfectly. Instead it makes the model generalize and use the data properly. Enter true or false.\n");
+                while (true){
+                    char* anti_prompt = input("Choose antiOverfittingOptimisations (true/false)? ");
+                    if (!anti_prompt){
+                        printf("Failed to read user input\n");
+                        return 1;
+                    }
+                    if (strcmp(anti_prompt, "true") == 0 || strcmp(anti_prompt, "false") == 0){
+                        cJSON_AddBoolToObject(new_config, "antiOverfittingOptimisations", strcmp(anti_prompt, "true") == 0);
+                        free(anti_prompt);
+                        break;
+                    } else {
+                        printf("Invalid input, must be true or false.\n");
+                        free(anti_prompt);
+                        continue;
+                    }
+                }
+
+                printf("\n");
+
+                char* autosave = NULL;
+                printf("autosave makes the program save the model each epoch automatically, so you don't lose progress if training is interrupted. Enter true or false.\n");
+                while (true){
+                    char* autosave_prompt = input("Choose autosave (true/false)? ");
+                    if (!autosave_prompt){
+                        printf("Failed to read user input\n");
+                        return 1;
+                    }
+                    if (strcmp(autosave_prompt, "true") == 0 || strcmp(autosave_prompt, "false") == 0){
+                        cJSON_AddBoolToObject(new_config, "autosave", strcmp(autosave_prompt, "true") == 0);
+                        free(autosave_prompt);
+                        break;
+                    } else {
+                        printf("Invalid input, must be true or false.\n");
+                        free(autosave_prompt);
+                        continue;
+                    }
+                }
+            }
+            printf("\n");
+
+            char* new_config_text = cJSON_Print(new_config);
+            if (!new_config_text){
+                printf("Failed to make the new config into text.\n");
+                return 1;
+            }
+            cJSON_Delete(new_config);
+
+            long long newconf_write_timer = timer();
+            printf("Writing new config to '%s'...\n", arg_b);
+
+            bool success = file_write(arg_b, new_config_text);
+            if (!success){
+                printf("Failed to write new config to '%s' in %lldms.\n", arg_b, timer_end(newconf_write_timer));
+                return 1;
+            }
+            printf("Wrote new config to '%s' in %lldms.\n", arg_b, timer_end(newconf_write_timer));
+            return 0;
+        }
+    }
+
     bool do_pretrain = false;
     bool do_train = false;
     bool new = false;
@@ -1265,6 +1836,27 @@ parse_config:
         }
     }
 
+    cJSON* autosave_raw = cJSON_GetObjectItem(config, "autosave");
+    bool autosave = false;
+    
+    if (!cJSON_IsBool(autosave_raw)){
+        if (do_pretrain || do_train){
+            printf("[Config] [Fatal] autosave is missing/corrupted.\n");
+            return 1;
+        }
+        else{
+            printf("[Config] [Warning] autosave is missing/corrupted but you did not specify either --pretrain or --train therefore this can be ignored.\n");
+        }
+    }
+    else{
+        if (do_pretrain || do_train){
+            autosave = cJSON_IsTrue(autosave_raw);
+        }
+        else{
+            printf("[Config] [Info] Ignoring autosave as you did not specify either --pretrain or --train.\n");
+        }
+    }
+
     cJSON* embeddingSize_raw = cJSON_GetObjectItem(config, "embeddingSize");
     if (!cJSON_IsNumber(embeddingSize_raw)){
         if (new){
@@ -1759,7 +2351,23 @@ after_config_parse:
         return;
     }
 
-    tokenize_ret tokenize(char* str_) {
+    int max_token_len = 0;
+    for (int index = 0; index < vocab_len; index++) {
+        char* tok = id_to_tok[index];
+        if (tok) {
+            int tok_len = strlen(tok);
+            if (tok_len > max_token_len) {
+                max_token_len = tok_len;
+            }
+        }
+    }
+
+    int unk_token_id = token_to_id("<|unk|>");
+    if (unk_token_id == -1) {
+        printf("Warning: <|unk|> token not found in vocabulary. Unknown characters will cause tokenization to fail.\n");
+    }
+
+    tokenize_ret tokenize(char* str_, bool verbose) {
         tokenize_ret out = {0};
 
         out.success = true;
@@ -1779,17 +2387,31 @@ after_config_parse:
         }
         strcpy(str, str_);
 
-        int* tokenized = NULL;       // dynamic array of int tokens
-        size_t tokenized_len = 0;    // number of tokens we have
+        int* tokenized = NULL;
+        size_t tokenized_len = 0;
         size_t consumed = 0;
+        int last_percent_hundredths = -1;
+        long long start_time = time_ms();
 
         while (consumed < len) {
+            // Progress tracking - update every 0.01%
+            int current_percent_hundredths = (int)((consumed * 10000) / len);
+            if (current_percent_hundredths > last_percent_hundredths) {
+                double percent = current_percent_hundredths / 100.0;
+                long long elapsed = time_ms() - start_time;
+                int elapsed_s = (int)((double)(elapsed) / 1000);
+                if (verbose){
+                    printf("\rTokenizing: %.2f%% (time elapsed: %ds)", percent, elapsed_s);
+                    fflush(stdout);
+                }
+                last_percent_hundredths = current_percent_hundredths;
+            }
 
-            size_t cursor = len - consumed;
+            size_t remaining = len - consumed;
+            size_t cursor_max = (remaining > max_token_len) ? max_token_len : remaining;
             int found = 0;
 
-            while (cursor > 0) {
-
+            for (size_t cursor = cursor_max; cursor > 0; cursor--) {
                 char saved = str[consumed + cursor];
                 str[consumed + cursor] = '\0';
 
@@ -1798,7 +2420,6 @@ after_config_parse:
                 str[consumed + cursor] = saved;
 
                 if (tok_id != -1) {
-
                     int* new_arr = realloc(tokenized, (tokenized_len + 1) * sizeof(int));
                     if (!new_arr) {
                         printf("Failed to allocate memory to tokenize text.\n");
@@ -1817,17 +2438,41 @@ after_config_parse:
                     found = 1;
                     break;
                 }
-
-                cursor--;
             }
 
             if (!found) {
-                free(tokenized);
-                free(str);
-                out.seq_len = 0;
-                out.tokens = NULL;
-                return out;
+                // No token found, use <|unk|> token and skip one byte
+                if (unk_token_id != -1) {
+                    int* new_arr = realloc(tokenized, (tokenized_len + 1) * sizeof(int));
+                    if (!new_arr) {
+                        printf("Failed to allocate memory to tokenize text.\n");
+                        free(tokenized);
+                        free(str);
+                        out.seq_len = 0;
+                        out.tokens = NULL;
+                        return out;
+                    }
+
+                    tokenized = new_arr;
+                    tokenized[tokenized_len] = unk_token_id;
+                    tokenized_len++;
+                    consumed += 1; // Skip one byte and continue
+                } else {
+                    // No <|unk|> token available, fail
+                    free(tokenized);
+                    free(str);
+                    out.seq_len = 0;
+                    out.tokens = NULL;
+                    return out;
+                }
             }
+        }
+
+        long long final_elapsed = time_ms() - start_time;
+        int final_elapsed_s = (int)((double)(final_elapsed) / 1000);
+        if (verbose){
+            printf("\rTokenizing: 100.00%% (time elapsed: %ds)\n", final_elapsed_s);
+            fflush(stdout);
         }
 
         free(str);
@@ -2908,18 +3553,27 @@ after_config_parse:
         optimizer = "sgd";
         goto after_opt_select;
     }
-    if ((strcmp(train_optimizer, "adam") == 0) || (strcmp(pre_train_optimizer, "adam") == 0)){
+
+    if (train_optimizer && strcmp(train_optimizer, "adam") == 0){
         optimizer = "adam";
     }
-    else{
-        if ((strcmp(train_optimizer, "sgd_momentum") == 0) || (strcmp(pre_train_optimizer, "sgd_momentum") == 0)){
-            optimizer = "sgd_momentum";
-        }
-        else{
-            if ((strcmp(train_optimizer, "sgd") == 0) || (strcmp(pre_train_optimizer, "sgd") == 0)){
-                optimizer = "sgd";
-            }
-        }
+    else if (pre_train_optimizer && strcmp(pre_train_optimizer, "adam") == 0){
+        optimizer = "adam";
+    }
+    else if (train_optimizer && strcmp(train_optimizer, "sgd_momentum") == 0){
+        optimizer = "sgd_momentum";
+    }
+    else if (pre_train_optimizer && strcmp(pre_train_optimizer, "sgd_momentum") == 0){
+        optimizer = "sgd_momentum";
+    }
+    else if (train_optimizer && strcmp(train_optimizer, "sgd") == 0){
+        optimizer = "sgd";
+    }
+    else if (pre_train_optimizer && strcmp(pre_train_optimizer, "sgd") == 0){
+        optimizer = "sgd";
+    }
+    else {
+        optimizer = "sgd"; // fallback
     }
 
 after_opt_select:
@@ -2965,7 +3619,7 @@ after_opt_select:
         long long save_timer = timer();
 
         //I tought the following function existed but it didn't, let's satisfy the code.
-        void cJSON_AddNumberToArray(cJSON* arr, float n){
+        void cJSON_AddNumberToArray(cJSON* arr, double n){
             cJSON_AddItemToArray(arr, cJSON_CreateNumber(n));
             return;
         }
@@ -5807,18 +6461,18 @@ after_opt_select:
         float temp = 0.0f;
 
         // Precompute template tokens
-        tokenize_ret bos_system_tok = tokenize("<|bos|>\nSystem: ");
+        tokenize_ret bos_system_tok = tokenize("<|bos|>\nSystem: ", false);
         if (!bos_system_tok.success){
             printf("Failed to tokenize bos_system template.\n");
             return false;
         }
-        tokenize_ret person_tok = tokenize("\n\nPerson:\n");
+        tokenize_ret person_tok = tokenize("\n\nPerson:\n", false);
         if (!person_tok.success){
             printf("Failed to tokenize person template.\n");
             free_tokenize_ret(bos_system_tok);
             return false;
         }
-        tokenize_ret you_tok = tokenize("\nYou:\n");
+        tokenize_ret you_tok = tokenize("\nYou:\n", false);
         if (!you_tok.success){
             printf("Failed to tokenize you template.\n");
             free_tokenize_ret(bos_system_tok);
@@ -5956,6 +6610,30 @@ after_opt_select:
                                 input_to_inference[strlen("/batchSize ")] = charaftersave;
                             }
                         }
+                        if (input_to_inference_len >= strlen("/autosave x")){
+                            charaftersave = input_to_inference[strlen("/autosave ")];
+                            input_to_inference[strlen("/autosave ")] = '\0';
+                            if (strcmp(input_to_inference, "/autosave ") == 0){
+                                input_to_inference[strlen("/autosave ")] = charaftersave;
+                                char* newptr = input_to_inference + strlen("/autosave ");
+                                if (strcmp(newptr, "true") == 0 || strcmp(newptr, "on") == 0 || strcmp(newptr, "yes") == 0){
+                                    autosave = true;
+                                    printf("Autosave is now on.\n");
+                                }
+                                else if (strcmp(newptr, "false") == 0 || strcmp(newptr, "off") == 0 || strcmp(newptr, "no") == 0){
+                                    autosave = false;
+                                    printf("Autosave is now off.\n");
+                                }
+                                else{
+                                    printf("Invalid autosave value. Use: true, on, yes, false, off, or no.\n");
+                                }
+                                free(input_to_inference);
+                                continue;
+                            }
+                            else{
+                                input_to_inference[strlen("/autosave ")] = charaftersave;
+                            }
+                        }
                         if (strcmp(input_to_inference, "/temperature") == 0){
                             printf("Current temperature: %.2f\n", temp);
                             printf("You can also specify a new temperature like this:\n");
@@ -5974,6 +6652,13 @@ after_opt_select:
                             printf("Current batch size: %d\n", batchSize);
                             printf("You can also specify a new batch size like this:\n");
                             printf("  /batchSize <new_batch_size>\n");
+                            free(input_to_inference);
+                            continue;
+                        }
+                        else if (strcmp(input_to_inference, "/autosave") == 0){
+                            printf("Autosave is %s\n", autosave ? "on" : "off");
+                            printf("You can also specify a new autosave state like this:\n");
+                            printf("  /autosave <true|on|yes|false|off|no>\n");
                             free(input_to_inference);
                             continue;
                         }
@@ -6011,6 +6696,13 @@ after_opt_select:
                         free(input_to_inference);
                         continue;
                     }
+                    else if (strcmp(input_to_inference, "/autosave") == 0){
+                        printf("Autosave is %s\n", autosave ? "on" : "off");
+                        printf("You can also specify a new autosave state like this:\n");
+                        printf("  /autosave <true|on|yes|false|off|no>\n");
+                        free(input_to_inference);
+                        continue;
+                    }
                     else{
                         goto checkpoint_generate_turn;
                     }
@@ -6019,7 +6711,7 @@ after_opt_select:
 
         checkpoint_generate_turn:
             // Tokenize user input
-            tokenize_ret input_tok = tokenize(input_to_inference);
+            tokenize_ret input_tok = tokenize(input_to_inference, false);
             if (!input_tok.success){
                 printf("Failed to tokenize user input.\n");
                 free(input_to_inference);
@@ -6092,6 +6784,168 @@ after_opt_select:
             }
             printf("(Generated in %lldms, %d tokens, %.2f tok/sec avr.)\n", timerresult, (int)token_n, tok_per_s);
         }
+    }
+
+    void pretrain(int epochAmount){
+        long long pretrain_timer = timer();
+        printf("Starting pretraining...\n");
+        
+        float* loss_history = NULL;
+        size_t loss_history_len = 0;
+
+        for (int epoch = 0; epoch < epochAmount; epoch++){
+            float loss_sum = 0;
+            size_t loss_n = 0;
+            long long epoch_timer = timer();
+            printf("Starting epoch %d/%d...\n", epoch + 1, epochAmount);
+            
+            for (int dataset = 0; dataset < pre_training_paths_len; dataset++){
+                long long dataset_timer = timer();
+                printf("Pretraining using dataset %d/%d...\n", dataset + 1, pre_training_paths_len);
+
+                long long dataset_read_timer = timer();
+                printf("Reading dataset...\n");
+                char* dataset_file = read_file(pre_training_paths[dataset]);
+                if (!dataset_file){
+                    printf("Failed to read dataset in %lldms.\n", timer_end(dataset_read_timer));
+                    exit(1);
+                }
+                printf("Read dataset in %lldms.\n", timer_end(dataset_read_timer));
+
+                printf("Tokenizing dataset...\n");
+                tokenize_ret full_tokens = tokenize(dataset_file, true);
+                free(dataset_file);
+                
+                if (!full_tokens.success){
+                    printf("Failed to tokenize dataset.\n");
+                    exit(1);
+                }
+                printf("Tokenized dataset (%zu tokens).\n", full_tokens.seq_len);
+
+                size_t total_tokens = full_tokens.seq_len;
+                int* all_tokens = full_tokens.tokens;
+
+                long long batch_time_sums = 0;
+                size_t batch_time_n = 0;
+                int every_n_batch = 0;
+                
+                long long window_timer = timer();
+                printf("Creating training tasks with sliding window (ctx=%d)...\n", contextSize);
+                
+                size_t tasks_created = 0;
+                
+                // For each token position, predict it from the previous tokens
+                for (size_t pos = 1; pos < total_tokens; pos++){
+                    // Grow from 1 token up to contextSize, then maintain contextSize
+                    size_t ctx_start = (pos > contextSize) ? (pos - contextSize) : 0;
+                    size_t ctx_len = pos - ctx_start;
+                    
+                    int* context_tokens = malloc(ctx_len * sizeof(int));
+                    if (!context_tokens){
+                        printf("Failed to allocate memory for context window.\n");
+                        exit(1);
+                    }
+                    memcpy(context_tokens, all_tokens + ctx_start, ctx_len * sizeof(int));
+                    
+                    int target_token_id = all_tokens[pos];
+                    train_step_token target = {0};
+                    target.token = id_to_token(target_token_id);
+                    target.token_id = target_token_id;
+                    
+                    add_to_worker_tasklist(context_tokens, ctx_len, target);
+                    tasks_created++;
+                    
+                    long long timer_flush = timer();
+                    float loss_sum_add = flush_worker_tasklist_if_required();
+                    timer_flush = timer_end(timer_flush);
+                    if (loss_sum_add != -1){
+                        batch_time_sums += timer_flush;
+                        batch_time_n++;
+                        loss_sum += loss_sum_add;
+                        loss_n++;
+                        if (batch_time_n > 0){
+                            long long eta_ms = batch_time_sums / batch_time_n * (int)((total_tokens -  pos) / batchSize);
+                            int hours = eta_ms / 3600000;
+                            int mins = (eta_ms % 3600000) / 60000;
+                            int secs = (eta_ms % 60000) / 1000;
+                            printf("\n------------------\n");
+                            
+                            if (eta_pause_toggle && every_n_batch == eta_pause_every_n_batch - 1){
+                                printf("ETA for current dataset: %02dh%02dm%02ds\n", hours, mins, secs);
+                                printf("(Pausing for %dms for you to see ETA)\n\n", eta_pause_time_ms);
+                                sleep_ms(eta_pause_time_ms);
+                                every_n_batch = 0;
+                            }
+                            else{
+                                printf("ETA for current dataset: %02dh%02dm%02ds\n\n", hours, mins, secs);
+                                every_n_batch++;
+                            }
+                        }
+                        else{
+                            printf("\n------------------\n");
+                            printf("ETA for current dataset: Not enough data to estimate.\n\n");
+                        }
+                    }
+                }
+                printf("Created %zu training tasks in %lldms.\n", tasks_created, timer_end(window_timer));
+                
+                printf("Flushing remaining worker tasks...\n");
+                long long timer_remaining = timer();
+                float loss_avr_remaining = flush_worker_tasklist();
+                if (loss_avr_remaining != -1){
+                    loss_sum += loss_avr_remaining;
+                    loss_n++;
+                    timer_remaining = timer_end(timer_remaining);
+                    batch_time_sums += timer_remaining;
+                    batch_time_n++;
+                    printf("Flushed remaining tasks with loss %f in %lldms.\n", loss_avr_remaining, timer_remaining);
+                }
+                else{
+                    printf("There were no remaining worker tasks to flush (found out in %lldms).\n", timer_end(timer_remaining));
+                }
+                
+                free(full_tokens.tokens);
+                printf("Pretrained using dataset %d/%d in %lldms.\n", dataset + 1, pre_training_paths_len, timer_end(dataset_timer));
+            }
+            
+            float loss_avr = (loss_n > 0) ? (loss_sum / (float)(loss_n)) : 0.0f;
+            loss_history_len++;
+            loss_history = realloc(loss_history, loss_history_len * sizeof(float));
+            if (!loss_history){
+                printf("Failed to allocate memory to track loss history.\n");
+                exit(1);
+            }
+            loss_history[loss_history_len - 1] = loss_avr;
+            printf("Finished epoch %d/%d with avg loss %.6f in %lldms.\n", epoch + 1, epochAmount, loss_avr, timer_end(epoch_timer));
+
+            printf("Autosave is %s.\n", autosave ? "on" : "off");
+            float current_loss = loss_avr;
+            if (autosave){
+                char filename[256];
+                sprintf(filename, "model_%.6f.zip", current_loss);
+
+                int modifier = 1;
+                while (file_exists(filename)){
+                    sprintf(filename, "model_%.6f_%d.zip", current_loss, modifier);
+                    modifier++;
+                }
+
+                save(filename);
+            }
+
+            char* checkpoint_response = input_with_timeout("Do you want to open checkpoint cli? Write anything and press enter if so (30 seconds to answer): ", 30000);
+            if (checkpoint_response){
+                free(checkpoint_response);
+                bool should_stop = training_interactive_cli(loss_avr, loss_history, loss_history_len, epoch + 1, epochAmount);
+                if (should_stop){
+                    break;
+                }
+            }
+        }
+        
+        free(loss_history);
+        printf("Finished pretraining for %d epochs in %lldms.\n", epochAmount, timer_end(pretrain_timer));
+        return;
     }
 
     void train(int epochAmount){
@@ -6185,7 +7039,7 @@ after_opt_select:
                     strcpy(system_segment, "<|bos|>\nSystem: ");
                     strcat(system_segment, item_system_prompt_raw->valuestring);
 
-                    tokenize_ret system_tokens = tokenize(system_segment);
+                    tokenize_ret system_tokens = tokenize(system_segment, false);
                     free(system_segment);
 
                     dataset_token_sequences[index] = malloc(system_tokens.seq_len * sizeof(int));
@@ -6238,7 +7092,7 @@ after_opt_select:
                         strcat(context_segment, turn_person->valuestring);
                         strcat(context_segment, "\nYou:\n");
 
-                        tokenize_ret context_tokens = tokenize(context_segment);
+                        tokenize_ret context_tokens = tokenize(context_segment, false);
                         free(context_segment);
 
                         size_t old_len = dataset_token_sequences_lens[index];
@@ -6261,7 +7115,7 @@ after_opt_select:
                         token_masks_lens[index] = old_mask_len + context_tokens.seq_len;
                         free_tokenize_ret(context_tokens);
 
-                        tokenize_ret response_tokens = tokenize(turn_model->valuestring);
+                        tokenize_ret response_tokens = tokenize(turn_model->valuestring, false);
 
                         old_len = dataset_token_sequences_lens[index];
                         dataset_token_sequences[index] = realloc(dataset_token_sequences[index], (old_len + response_tokens.seq_len) * sizeof(int));
@@ -6330,6 +7184,10 @@ after_opt_select:
                 double avr_tokens_per_entry = (total_entries > 0) ? (double)(total_tokens) / (double)(total_entries) : 0.0f;
                 printf("%zu tokens in dataset, %.2f tok/dataset entry avr. (counted in %lldms)\n", total_tokens, avr_tokens_per_entry, timer_end(dataset_count_tokens_timer));
 
+                long long batch_time_sums = 0;
+                size_t batch_time_n = 0;
+                int every_n_batch = 0;
+
                 for (int index = 0; index < total_entries; index++){
                     long long entry_timer = timer();
                     printf("Training on entry %d/%d...\n", index + 1, total_entries);
@@ -6394,7 +7252,9 @@ after_opt_select:
                             exit(1);
                         }
 
+                        long long timer_flush = timer();
                         float loss_sum_add = flush_worker_tasklist_if_required();
+                        timer_flush = timer_end(timer_flush);
 
                         debug_tok = dataset_token_sequences[0][0];
                         if (debug_tok < 0 || debug_tok >= vocab_len){
@@ -6403,8 +7263,38 @@ after_opt_select:
                         }
 
                         if (loss_sum_add != -1){
+                            batch_time_sums += timer_flush;
+                            batch_time_n++;
                             loss_sum += loss_sum_add;
                             loss_n++;
+                            if (batch_time_n > 0){
+                                size_t remaining_tokens = 0;
+                                for (int future_entry = index + 1; future_entry < total_entries; future_entry++){
+                                    remaining_tokens += dataset_token_sequences_lens[future_entry];
+                                }
+                                remaining_tokens += entry_mask_len - pos;
+                                
+                                long long eta_ms = batch_time_sums / batch_time_n * (int)(remaining_tokens / batchSize);
+                                int hours = eta_ms / 3600000;
+                                int mins = (eta_ms % 3600000) / 60000;
+                                int secs = (eta_ms % 60000) / 1000;
+                                printf("\n------------------\n");
+                                
+                                if (eta_pause_toggle && every_n_batch == eta_pause_every_n_batch - 1){
+                                    printf("ETA for current dataset: %02dh%02dm%02ds\n", hours, mins, secs);
+                                    printf("(Pausing for %dms for you to see ETA)\n\n", eta_pause_time_ms);
+                                    sleep_ms(eta_pause_time_ms);
+                                    every_n_batch = 0;
+                                }
+                                else{
+                                    printf("ETA for current dataset: %02dh%02dm%02ds\n\n", hours, mins, secs);
+                                    every_n_batch++;
+                                }
+                            }
+                            else{
+                                printf("\n------------------\n");
+                                printf("ETA for current dataset: Not enough data to estimate.\n\n");
+                            }
                         }
                     }
                     free(context_tokens);
@@ -6440,7 +7330,22 @@ after_opt_select:
             loss_history[loss_history_len - 1] = loss_avr;
             printf("Finished epoch %d/%d in %lldms.\n", epoch + 1, epochAmount, timer_end(epoch_timer));
 
-            char* checkpoint_response = input_with_timeout("Do you want to open checkpoint cli? (30 seconds to answer): ", 30000);
+            printf("Autosave is %s.\n", autosave ? "on" : "off");
+            float current_loss = loss_avr;
+            if (autosave){
+                char filename[256];
+                sprintf(filename, "model_%.6f.zip", current_loss);
+
+                int modifier = 1;
+                while (file_exists(filename)){
+                    sprintf(filename, "model_%.6f_%d.zip", current_loss, modifier);
+                    modifier++;
+                }
+
+                save(filename);
+            }
+
+            char* checkpoint_response = input_with_timeout("Do you want to open checkpoint cli? Write anything and press enter if so (30 seconds to answer): ", 30000);
             if (checkpoint_response){
                 free(checkpoint_response);
                 bool should_stop = training_interactive_cli(loss_avr, loss_history, loss_history_len, epoch + 1, epochAmount);
@@ -6451,6 +7356,10 @@ after_opt_select:
         }
         printf("Finished training for %d epochs in %lldms.\n", epochAmount, timer_end(train_timer));
         return;
+    }
+    
+    if (do_pretrain){
+        pretrain(pre_train_epochs);
     }
     if (do_train) {
         train(train_epochs);
@@ -6502,18 +7411,18 @@ after_opt_select:
     }
 
     // Precompute template tokens
-    tokenize_ret bos_system_tok = tokenize("<|bos|>\nSystem: ");
+    tokenize_ret bos_system_tok = tokenize("<|bos|>\nSystem: ", false);
     if (!bos_system_tok.success){
         printf("Failed to tokenize bos_system template.\n");
         return 1;
     }
-    tokenize_ret person_tok = tokenize("\n\nPerson:\n");
+    tokenize_ret person_tok = tokenize("\n\nPerson:\n", false);
     if (!person_tok.success){
         printf("Failed to tokenize person template.\n");
         free_tokenize_ret(bos_system_tok);
         return 1;
     }
-    tokenize_ret you_tok = tokenize("\nYou:\n");
+    tokenize_ret you_tok = tokenize("\nYou:\n", false);
     if (!you_tok.success){
         printf("Failed to tokenize you template.\n");
         free_tokenize_ret(bos_system_tok);
@@ -6629,7 +7538,7 @@ after_opt_select:
 
     generate_turn:
         // Tokenize user input
-        tokenize_ret input_tok = tokenize(input_to_inference);
+        tokenize_ret input_tok = tokenize(input_to_inference, false);
         if (!input_tok.success){
             printf("Failed to tokenize user input.\n");
             free(input_to_inference);
