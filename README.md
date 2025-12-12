@@ -10,7 +10,7 @@ I am willmil11, a 15 year old french self taught dev.
 I tought about how cleanai's codebase is pure hot steaming garbage and decided to remake it but in C.
 
 ## How long have you been working on this?
-I've been working on the <a href="https://github.com/willmil11/cleanai">original cleanai repo</a> for almost 11 months (although realistically I stopped working on it since 6 months ago so more like 5 months). And I've been working on this repo you're on right now for about 4 months.
+I've been working on the <a href="https://github.com/willmil11/cleanai">original cleanai repo</a> for almost 11 months (although realistically I stopped working on it since 6 months ago so more like 5 months). And I've been working on this repo you're on right now for about 4 months. (Note that this information is true today, dec. 12 2025 but will change in the future, that is how time works.)
 
 ## How to use?
 <strong>Automatic way</strong>
