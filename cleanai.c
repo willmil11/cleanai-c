@@ -1340,6 +1340,8 @@ int main(int argc, char** argv){
 
     printf("Arguments parsed successfully :)\n");
 
+    bool did_parse_config = true;
+
     int contextSize = -1;
     int maxOutputSize = -1;
     if (load && (!do_pretrain) && (!do_train)){
@@ -1377,6 +1379,7 @@ int main(int argc, char** argv){
                 continue;
             }
         }
+        did_parse_config = false;
         goto after_config_parse;
     }
 
@@ -3547,6 +3550,11 @@ after_config_parse:
     double total_mb_memory = 0;
     size_t real_param_total = 0;
 
+    if (!did_parse_config){
+        train_optimizer = NULL;
+        pre_train_optimizer = NULL;
+    }
+
     //To compute memory usage, compute using heaviest optimizer
     char* optimizer = NULL;
     if ((!train_optimizer) && (!pre_train_optimizer)){
@@ -3554,26 +3562,36 @@ after_config_parse:
         goto after_opt_select;
     }
 
-    if (train_optimizer && strcmp(train_optimizer, "adam") == 0){
-        optimizer = "adam";
+    optimizer = "sgd";
+
+    if (pre_train_optimizer){
+        if (strcmp(pre_train_optimizer, "adam") == 0){
+            optimizer = "adam";
+        }
+        else{
+            if (strcmp(pre_train_optimizer, "sgd_momentum") == 0){
+                optimizer = "sgd_momentum";
+            }
+            else{
+                optimizer = "sgd";
+            }
+        }
     }
-    else if (pre_train_optimizer && strcmp(pre_train_optimizer, "adam") == 0){
-        optimizer = "adam";
-    }
-    else if (train_optimizer && strcmp(train_optimizer, "sgd_momentum") == 0){
-        optimizer = "sgd_momentum";
-    }
-    else if (pre_train_optimizer && strcmp(pre_train_optimizer, "sgd_momentum") == 0){
-        optimizer = "sgd_momentum";
-    }
-    else if (train_optimizer && strcmp(train_optimizer, "sgd") == 0){
-        optimizer = "sgd";
-    }
-    else if (pre_train_optimizer && strcmp(pre_train_optimizer, "sgd") == 0){
-        optimizer = "sgd";
-    }
-    else {
-        optimizer = "sgd"; // fallback
+
+    if (train_optimizer){
+        if (strcmp(train_optimizer, "adam") == 0){
+            optimizer = "adam";
+        }
+        else{
+            if ((strcmp(train_optimizer, "sgd_momentum") == 0) && (!(strcmp(optimizer, "adam") == 0))){
+                optimizer = "sgd_momentum";
+            }
+            else{
+                if (!((strcmp(optimizer, "adam") == 0) || (strcmp(optimizer, "sgd_momentum") == 0))){
+                    optimizer = "sgd";
+                }
+            }
+        }
     }
 
 after_opt_select:
@@ -5439,7 +5457,7 @@ after_opt_select:
         free(ret.vocab_projection.biases.v);
     }
 
-    train_step_ret train_step(int* tokens, size_t tokens_len, train_step_token target_token){
+    train_step_ret train_step(int* tokens, size_t tokens_len, train_step_token target_token, bool* mask, size_t mask_len){
         //I will be computing this once and only once for this function
         float scale = sqrtf(head_dim);
 
@@ -5601,6 +5619,8 @@ after_opt_select:
         float** predicted_probs = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute predicted probs.");
         float** initial_error = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory to compute initial error.");
 
+        bool use_mask = (mask != NULL && mask_len > 0);
+
         for (int pos = 0; pos < seq_len; pos++){
             predicted_probs[pos] = track(calloc(vocab_len * sizeof(float), 1), "Failed to allocate memory to compute predicted probs.");
             initial_error[pos] = track(calloc(vocab_len * sizeof(float), 1), "Failed to allocate memory to compute initial error.");
@@ -5615,15 +5635,28 @@ after_opt_select:
                 target_id = target_token.token_id;
             }
 
-            for (int index = 0; index < vocab_len; index++){
-                float target_val = epsilon_grad / (vocab_len - 1);
-                if (index == target_id){
-                    target_val = 1.0f - epsilon_grad;
+            // Only compute loss if mask is not being used, or if mask[pos] is true
+            bool should_compute_loss = true;
+            if (use_mask){
+                if (pos >= mask_len){
+                    should_compute_loss = false;
                 }
-                total_loss += -target_val * logf(predicted_probs[pos][index] + 1e-12f);
-                initial_error[pos][index] = predicted_probs[pos][index] - target_val;
+                else{
+                    should_compute_loss = mask[pos];
+                }
             }
-            loss_terms++;
+
+            if (should_compute_loss){
+                for (int index = 0; index < vocab_len; index++){
+                    float target_val = epsilon_grad / (vocab_len - 1);
+                    if (index == target_id){
+                        target_val = 1.0f - epsilon_grad;
+                    }
+                    total_loss += -target_val * logf(predicted_probs[pos][index] + 1e-12f);
+                    initial_error[pos][index] = predicted_probs[pos][index] - target_val;
+                }
+                loss_terms++;
+            }
         }
 
         float initial_loss = (loss_terms > 0) ? (total_loss / loss_terms) : 0.0f;
@@ -6027,6 +6060,8 @@ after_opt_select:
         int* tokens;
         size_t tokens_len;
         train_step_token target_token;
+        bool* mask;
+        size_t mask_len;
     } threadData;
 
     THREAD_RETURN THREAD_CALL workerThread(void* arg){
@@ -6040,11 +6075,14 @@ after_opt_select:
             exit(1);
         }
 
-        train_step_ret stack_ret = train_step(data.tokens, data.tokens_len, data.target_token);
+        train_step_ret stack_ret = train_step(data.tokens, data.tokens_len, data.target_token, data.mask, data.mask_len);
 
         memcpy(rets, &stack_ret, sizeof(train_step_ret));
 
         free(data.tokens);
+        if (data.mask){
+            free(data.mask);
+        }
 
         return rets;
     }
@@ -6053,12 +6091,14 @@ after_opt_select:
         int* tokens;
         size_t tokens_len;
         train_step_token target;
+        bool* mask;
+        size_t mask_len;
     } worker_task;
 
     worker_task* worker_tasklist = NULL;
     int worker_tasklist_len = 0;
 
-    void add_to_worker_tasklist(int* tokens, size_t tokens_len, train_step_token target){
+    void add_to_worker_tasklist(int* tokens, size_t tokens_len, train_step_token target, bool* mask, size_t mask_len){
         worker_tasklist_len++;
         worker_tasklist = realloc(worker_tasklist, worker_tasklist_len * sizeof(worker_task));
         if (!worker_tasklist){
@@ -6068,6 +6108,8 @@ after_opt_select:
         worker_tasklist[worker_tasklist_len - 1].target = target;
         worker_tasklist[worker_tasklist_len - 1].tokens = tokens;
         worker_tasklist[worker_tasklist_len - 1].tokens_len = tokens_len;
+        worker_tasklist[worker_tasklist_len - 1].mask = mask;
+        worker_tasklist[worker_tasklist_len - 1].mask_len = mask_len;
         return;
     }
 
@@ -6301,6 +6343,8 @@ after_opt_select:
                 data->tokens = worker_tasklist[index].tokens;
                 data->tokens_len = worker_tasklist[index].tokens_len;
                 data->target_token = worker_tasklist[index].target;
+                data->mask = worker_tasklist[index].mask;
+                data->mask_len = worker_tasklist[index].mask_len;
 
                 Thread thread;
                 worker_threads_len++;
@@ -6782,7 +6826,7 @@ after_opt_select:
             if (timerresult > 0){
                 tok_per_s = 1000 * (float)(token_n) / (float)(timerresult);
             }
-            printf("(Generated in %lldms, %d tokens, %.2f tok/sec avr.)\n", timerresult, (int)token_n, tok_per_s);
+            printf("\n(Generated in %lldms, %d tokens, %.2f tok/sec avr.)\n", timerresult, (int)token_n, tok_per_s);
         }
     }
 
@@ -6852,7 +6896,7 @@ after_opt_select:
                     target.token = id_to_token(target_token_id);
                     target.token_id = target_token_id;
                     
-                    add_to_worker_tasklist(context_tokens, ctx_len, target);
+                    add_to_worker_tasklist(context_tokens, ctx_len, target, NULL, 0);
                     tasks_created++;
                     
                     long long timer_flush = timer();
@@ -7234,7 +7278,23 @@ after_opt_select:
                                 exit(1);
                             }
                             memcpy(context_copy, context_tokens, context_tokens_len * sizeof(int));
-                            add_to_worker_tasklist(context_copy, context_tokens_len, target);
+                            
+                            // Create mask for the context - mark which positions are trainable
+                            bool* context_mask = malloc(context_tokens_len * sizeof(bool));
+                            if (!context_mask){
+                                printf("Failed to allocate memory to copy context mask.\n");
+                                exit(1);
+                            }
+
+                            for (int i = 0; i < context_tokens_len; i++){
+                                if (i + 1 < entry_mask_len){
+                                    context_mask[i] = entry_mask[i + 1];
+                                } else {
+                                    context_mask[i] = false;
+                                }
+                            }
+
+                            add_to_worker_tasklist(context_copy, context_tokens_len, target, context_mask, context_tokens_len);
 
                             // Add this token to context for next iteration
                             context_tokens_len++;
@@ -7587,10 +7647,10 @@ after_opt_select:
                 goto after_inference_print;
             }
 
-        after_inference_print:
             printf("%s", predicted_token);
             fflush(stdout);
 
+        after_inference_print:
             // Append predicted token ID to context
             context_tokens = realloc(context_tokens, (context_tokens_len + 1) * sizeof(int));
             if (!context_tokens){
@@ -7610,7 +7670,7 @@ after_opt_select:
         if (timerresult > 0){
             tok_per_s = 1000 * (float)(token_n) / (float)(timerresult);
         }
-        printf("(Generated in %lldms, %d tokens, %.2f tok/sec avr.)\n", timerresult, (int)token_n, tok_per_s);
+        printf("\n(Generated in %lldms, %d tokens, %.2f tok/sec avr.)\n", timerresult, (int)token_n, tok_per_s);
     }
 
     //NOTE: Old demos
