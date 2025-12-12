@@ -7,7 +7,7 @@ I'm the guy that made <a href="https://github.com/willmil11/cleanai">cleanai</a>
 I am willmil11, a 15 year old french self taught dev.
 
 ## Why are you doing this?
-I tought about how cleanai's codebase is pure hot steaming garbage and decided to remake it but in C, also I love C :)
+I tought about how cleanai's codebase is pure hot steaming garbage and decided to remake it but in C.
 
 ## How long have you been working on this?
 I've been working on the <a href="https://github.com/willmil11/cleanai">original cleanai repo</a> since a very long time, however I've only been working on this one since a month or two I think.
