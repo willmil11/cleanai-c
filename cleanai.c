@@ -6930,13 +6930,13 @@ after_opt_select:
                             printf("\n------------------\n");
                             
                             if (eta_pause_toggle && every_n_batch == eta_pause_every_n_batch - 1){
-                                printf("ETA for current dataset: %02dh%02dm%02ds\n", hours, mins, secs);
+                                printf("ETA for current dataset: %02dh%02dm%02ds (%zu tokens, ~%.2f batches)\n", hours, mins, secs, total_tokens, ((double)(total_tokens) / batchSize));
                                 printf("(Pausing for %dms for you to see ETA)\n\n", eta_pause_time_ms);
                                 sleep_ms(eta_pause_time_ms);
                                 every_n_batch = 0;
                             }
                             else{
-                                printf("ETA for current dataset: %02dh%02dm%02ds\n\n", hours, mins, secs);
+                                printf("ETA for current dataset: %02dh%02dm%02ds (%zu tokens, ~%.2f batches)\n\n", hours, mins, secs, total_tokens, ((double)(total_tokens) / batchSize));
                                 every_n_batch++;
                             }
                         }
@@ -7371,13 +7371,13 @@ after_opt_select:
                                 printf("\n------------------\n");
                                 
                                 if (eta_pause_toggle && every_n_batch == eta_pause_every_n_batch - 1){
-                                    printf("ETA for current dataset: %02dh%02dm%02ds\n", hours, mins, secs);
+                                    printf("ETA for current dataset: %02dh%02dm%02ds (%zu tokens, ~%.2f batches)\n", hours, mins, secs, remaining_tokens, ((double)(remaining_tokens) / batchSize));
                                     printf("(Pausing for %dms for you to see ETA)\n\n", eta_pause_time_ms);
                                     sleep_ms(eta_pause_time_ms);
                                     every_n_batch = 0;
                                 }
                                 else{
-                                    printf("ETA for current dataset: %02dh%02dm%02ds\n\n", hours, mins, secs);
+                                    printf("ETA for current dataset: %02dh%02dm%02ds (%zu tokens, ~%.2f batches)\n\n", hours, mins, secs, remaining_tokens, ((double)(remaining_tokens) / batchSize));
                                     every_n_batch++;
                                 }
                             }
