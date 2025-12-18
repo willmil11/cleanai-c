@@ -594,6 +594,8 @@ int main(int argc, char** argv){
         char* arg_b = argv[1];
         if (strcmp(arg_a, "--init-config") == 0){
             printf("Arguments parsed successfully :)\n");
+
+            bool first_correct = true;
             
         init_config_file_exists_check:
             if (file_exists(arg_b)){
@@ -616,8 +618,14 @@ int main(int argc, char** argv){
                                 printf("Failed to read user input.\n");
                                 return 1;
                             }
-                            arg_b = new_arg_b;
                             free(overwrite_prompt);
+                            if (first_correct){
+                                first_correct = false;
+                            }
+                            else{
+                                free(arg_b);
+                            }
+                            arg_b = new_arg_b;
                             goto init_config_file_exists_check;
                         }
                         else{
@@ -1012,7 +1020,7 @@ int main(int argc, char** argv){
                 printf("\n");
 
                 double learning_rate_decay = 0;
-                printf("learningRateDecay is a factor that the learning rate is multiplied by when loss has not improved for learningRateDecayPatience epochs. This helps prevent getting stuck and fine-tunes training. Common values range from 0.5 to 0.99.\n");
+                printf("learningRateDecay is a factor that the learning rate is multiplied by when initial loss has not improved for learningRateDecayPatience epochs. This helps prevent getting stuck and fine-tunes training. Common values range from 0.5 to 0.99.\n");
                 while (true){
                     char* decay_prompt = input("Choose learningRateDecay (float, 0-1)? ");
                     if (!decay_prompt){
@@ -1032,7 +1040,7 @@ int main(int argc, char** argv){
                 printf("\n");
 
                 int learning_rate_decay_patience = 0;
-                printf("learningRateDecayPatience is the number of epochs the loss must not improve before the learning rate is decayed.\n");
+                printf("learningRateDecayPatience is the number of epochs the initial loss must not improve for before the learning rate is decayed.\n");
                 while (true){
                     char* patience_prompt = input("Choose learningRateDecayPatience (integer, >=1)? ");
                     if (!patience_prompt){
@@ -2430,6 +2438,7 @@ after_config_parse:
                         free(str);
                         out.seq_len = 0;
                         out.tokens = NULL;
+                        out.success = false;
                         return out;
                     }
 
@@ -2453,6 +2462,7 @@ after_config_parse:
                         free(str);
                         out.seq_len = 0;
                         out.tokens = NULL;
+                        out.success = false;
                         return out;
                     }
 
@@ -3885,11 +3895,13 @@ after_opt_select:
         
         if (!mz_zip_writer_init_file(&zipfile, filepath, 0)){
             printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+            free(model_meta_save);
             return false;
         }
 
         if (!mz_zip_writer_add_mem(&zipfile, "model_meta.json", model_meta_save, model_meta_save_len, MZ_NO_COMPRESSION)){
             printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+            free(model_meta_save);
             mz_zip_writer_end(&zipfile);
             return false;
         }
@@ -4641,6 +4653,8 @@ after_opt_select:
             final_embeddings[index] = final_embedding;
         }
 
+        float** initial_embeddings_to_free = final_embeddings;
+
         verbprintf("Computed final embeddings in %lldms.\n", timer_end(subtimer));
 
         long long layerstimer = timer();
@@ -5338,6 +5352,10 @@ after_opt_select:
 
         verbprintf("Computed next token in %lldms.\n", timer_end(timer_token));
         if (return_cache){
+            for (int index = 0; index < seq_len; index++){
+                free(initial_embeddings_to_free[index]);
+            }
+            free(initial_embeddings_to_free);
             rets.cache.final_embeddings = final_embeddings;
         }
         else{
@@ -6175,23 +6193,6 @@ after_opt_select:
             loss_count++;
         }
 
-        if (loss_count > 0){
-            float avg_loss = loss_sum / (float)(loss_count);
-            if (avg_loss < lr_plateau_best_loss - 1e-6f){
-                lr_plateau_best_loss = avg_loss;
-                lr_plateau_counter = 0;
-            }
-            else{
-                lr_plateau_counter++;
-                if (lr_plateau_counter >= patience){
-                    learningRate *= lr_reduce_amount;
-                    lr_plateau_counter = 0;
-                    printf("Reduced learning rate to %f after plateau (avg_loss=%.6f best=%.6f).\n", learningRate, avg_loss, lr_plateau_best_loss);
-                }
-            }
-            lr = (float)(learningRate);
-        }
-
         void ensure_moments(param* p, size_t count, bool need_m, bool need_v){
             if (need_m){
                 if (!p->m){
@@ -6249,7 +6250,17 @@ after_opt_select:
                 continue;
             }
             if (!grad->success){
-                // Don't call free_train_step_ret on failed results - they have uninitialized memory
+                if (grad->tokenized){
+                    free(grad->tokenized);
+                }
+                if (grad->embedding_grads){
+                    for (int i = 0; i < grad->seq_len; i++){
+                        if (grad->embedding_grads[i]){
+                            free(grad->embedding_grads[i]);
+                        }
+                    }
+                    free(grad->embedding_grads);
+                }
                 if (grad->layer_grads){
                     free(grad->layer_grads);
                 }
@@ -6440,11 +6451,11 @@ after_opt_select:
     bool training_interactive_cli(float current_loss, float* loss_history, size_t loss_history_len, int current_epoch, int total_epochs){
         printf("\n-----------------------------------------------------\n");
         printf("Training checkpoint - Epoch %d/%d\n", current_epoch, total_epochs);
-        printf("Current loss: %.6f\n", current_loss);
+        printf("Current initial loss: %.6f\n", current_loss);
         if (loss_history_len > 0){
             float best_loss = loss_history[0];
             int start = (loss_history_len > 5) ? loss_history_len - 5 : 0;
-            printf("Loss history (last 5): ");
+            printf("Initial loss history (last 5): ");
 
             for (int i = 0; i < loss_history_len; i++){
                 if (loss_history[i] < best_loss){
@@ -6454,7 +6465,7 @@ after_opt_select:
                     printf("%.6f ", loss_history[i]);
                 }
             }
-            printf("\nBest loss: %.6f\n", best_loss);
+            printf("\nBest initial loss: %.6f\n", best_loss);
         }
         printf("Default temp to test the model is 0\n");
         printf("Commands:\n");
@@ -6828,6 +6839,10 @@ after_opt_select:
             }
             printf("\n(Generated in %lldms, %d tokens, %.2f tok/sec avr.)\n", timerresult, (int)token_n, tok_per_s);
         }
+        free_tokenize_ret(bos_system_tok);
+        free_tokenize_ret(person_tok);
+        free_tokenize_ret(you_tok);
+        free(context_tokens);
     }
 
     void pretrain(int epochAmount){
@@ -6933,7 +6948,7 @@ after_opt_select:
                 }
                 printf("Created %zu training tasks in %lldms.\n", tasks_created, timer_end(window_timer));
                 
-                printf("Flushing remaining worker tasks...\n");
+                printf("Flushing remaining worker tasks (if any)...\n");
                 long long timer_remaining = timer();
                 float loss_avr_remaining = flush_worker_tasklist();
                 if (loss_avr_remaining != -1){
@@ -6942,7 +6957,7 @@ after_opt_select:
                     timer_remaining = timer_end(timer_remaining);
                     batch_time_sums += timer_remaining;
                     batch_time_n++;
-                    printf("Flushed remaining tasks with loss %f in %lldms.\n", loss_avr_remaining, timer_remaining);
+                    printf("Flushed remaining tasks with initial loss %f in %lldms.\n", loss_avr_remaining, timer_remaining);
                 }
                 else{
                     printf("There were no remaining worker tasks to flush (found out in %lldms).\n", timer_end(timer_remaining));
@@ -6953,14 +6968,26 @@ after_opt_select:
             }
             
             float loss_avr = (loss_n > 0) ? (loss_sum / (float)(loss_n)) : 0.0f;
+            if (loss_avr < lr_plateau_best_loss - 1e-6f){
+                lr_plateau_best_loss = loss_avr;
+                lr_plateau_counter = 0;
+            }
+            else{
+                lr_plateau_counter++;
+                if (lr_plateau_counter >= patience){
+                    learningRate *= lr_reduce_amount;
+                    lr_plateau_counter = 0;
+                    printf("Reduced learning rate to %f after plateau (epoch_initial_loss=%.6f best=%.6f).\n", learningRate, loss_avr, lr_plateau_best_loss);
+                }
+            }
             loss_history_len++;
             loss_history = realloc(loss_history, loss_history_len * sizeof(float));
             if (!loss_history){
-                printf("Failed to allocate memory to track loss history.\n");
+                printf("Failed to allocate memory to track initial loss history.\n");
                 exit(1);
             }
             loss_history[loss_history_len - 1] = loss_avr;
-            printf("Finished epoch %d/%d with avg loss %.6f in %lldms.\n", epoch + 1, epochAmount, loss_avr, timer_end(epoch_timer));
+            printf("Finished epoch %d/%d with avg initial loss %.6f in %lldms.\n", epoch + 1, epochAmount, loss_avr, timer_end(epoch_timer));
 
             printf("Autosave is %s.\n", autosave ? "on" : "off");
             float current_loss = loss_avr;
@@ -6989,6 +7016,9 @@ after_opt_select:
         
         free(loss_history);
         printf("Finished pretraining for %d epochs in %lldms.\n", epochAmount, timer_end(pretrain_timer));
+        //Reset plateau counters for train
+        lr_plateau_best_loss = __FLT_MAX__;
+        lr_plateau_counter = 0;
         return;
     }
 
@@ -7367,7 +7397,7 @@ after_opt_select:
                     printf("There weren't any remaining worker tasks to flush (found out in %lldms).\n", timer_end(timer_remaining));
                 }
                 else{
-                    printf("Flushed remaining worker tasks with avr loss %f in %lldms.\n", loss_avr_remaining, timer_end(timer_remaining));
+                    printf("Flushed remaining worker tasks with avr initial loss %f in %lldms.\n", loss_avr_remaining, timer_end(timer_remaining));
                 }
 
                 for (int index = 0; index < total_entries; index++){
@@ -7381,6 +7411,18 @@ after_opt_select:
                 printf("Trained using dataset %d/%d in %lldms.\n", dataset + 1, training_dataset_paths_len, timer_end(dataset_timer));
             }
             float loss_avr = loss_sum / (float)(loss_n);
+            if (loss_avr < lr_plateau_best_loss - 1e-6f){
+                lr_plateau_best_loss = loss_avr;
+                lr_plateau_counter = 0;
+            }
+            else{
+                lr_plateau_counter++;
+                if (lr_plateau_counter >= patience){
+                    learningRate *= lr_reduce_amount;
+                    lr_plateau_counter = 0;
+                    printf("Reduced learning rate to %f after plateau (epoch_initial_loss=%.6f best=%.6f).\n", learningRate, loss_avr, lr_plateau_best_loss);
+                }
+            }
             loss_history_len++;
             loss_history = realloc(loss_history, loss_history_len * sizeof(float));
             if (!loss_history){
