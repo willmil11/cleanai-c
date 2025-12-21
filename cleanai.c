@@ -362,17 +362,25 @@ bool file_write(char* path, char* content) {
 
 #ifdef _WIN32
     HANDLE timer_mutex = NULL;
+    HANDLE id_mutex = NULL;
     void init_timer_mutex() {
         timer_mutex = CreateMutexA(NULL, FALSE, NULL);
+        id_mutex = CreateMutexA(NULL, FALSE, NULL);
     }
     void lock_timer() { WaitForSingleObject(timer_mutex, INFINITE); }
     void unlock_timer() { ReleaseMutex(timer_mutex); }
+    void lock_id() { WaitForSingleObject(id_mutex, INFINITE); }
+    void unlock_id() { ReleaseMutex(id_mutex); }
 #else
     pthread_mutex_t timer_mutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_t id_mutex = PTHREAD_MUTEX_INITIALIZER;
     void init_timer_mutex() {}
     void lock_timer() { pthread_mutex_lock(&timer_mutex); }
     void unlock_timer() { pthread_mutex_unlock(&timer_mutex); }
+    void lock_id() { pthread_mutex_lock(&id_mutex); }
+    void unlock_id() { pthread_mutex_unlock(&id_mutex); }
 #endif
+
 int main(int argc, char** argv){
     init_timer_mutex();
 
@@ -387,16 +395,32 @@ int main(int argc, char** argv){
     srand(time(NULL));
 
     int genid(){
+        lock_id();
         int id;
         while (true){
-            id = rand() % 100000;
+            // Thread-safe random
+            #ifdef _WIN32
+            unsigned int rand_val;
+            rand_s(&rand_val);
+            id = rand_val % 100000;
+            #else
+            static __thread unsigned int tls_seed = 0;
+            static __thread bool tls_seed_init = false;
+            if (!tls_seed_init) {
+                tls_seed = (unsigned int)time(NULL) ^ (unsigned int)pthread_self();
+                tls_seed_init = true;
+            }
+            id = rand_r(&tls_seed) % 100000;
+            #endif
 
             if (!ids){
+                unlock_id();
                 return id;
             }
 
             if (ids_len == 100000){
-                printf("All possible ids combinations exhaused, this id will be a duplicate of another id.\n");
+                printf("All possible ids combinations exhausted, this id will be a duplicate of another id.\n");
+                unlock_id();
                 return id;
             }
 
@@ -412,20 +436,23 @@ int main(int argc, char** argv){
                 break;
             }
         }
-        //grw
+        
         int* tmp_ids = realloc(ids, (ids_len + 1) * sizeof(int));
         if (!tmp_ids){
             printf("Failed memory allocation to grow ids list.\n");
-            return id; //better to return something than nothing
+            unlock_id();
+            return id;
         }
         ids = tmp_ids;
 
         ids[ids_len] = id;
         ids_len++;
+        unlock_id();
         return id;
     }
 
     int freeId(int id){
+        lock_id();
         int indexOfId = -1;
         for (int index = 0; index < ids_len; index++){
             if (id == ids[index]){
@@ -434,13 +461,14 @@ int main(int argc, char** argv){
             }
         }
         if (indexOfId == -1){
-            return -1; //id not found
+            unlock_id();
+            return -1;
         }
 
-        //shrnk
         int* n_ids = malloc((ids_len - 1) * sizeof(int));
         if (!n_ids){
             printf("Failed to allocate memory to shrink ids list.\n");
+            unlock_id();
             return -1;
         }
 
@@ -456,6 +484,7 @@ int main(int argc, char** argv){
         free(ids);
         ids = n_ids;
         ids_len--;
+        unlock_id();
         return 0;
     }
 
@@ -532,7 +561,7 @@ int main(int argc, char** argv){
             new_timers[index - offset] = malloc(2 * sizeof(long long));
             if (!new_timers[index - offset]){
                 printf("Failed memory allocation to shrink timers list.\n");
-                for (int subindex = 0; subindex < timers_len - index - offset; subindex++){
+                for (int subindex = 0; subindex < index - offset; subindex++){
                     free(new_timers[subindex]);
                 }
                 free(new_timers);
@@ -1871,7 +1900,7 @@ parse_config:
     cJSON* embeddingSize_raw = cJSON_GetObjectItem(config, "embeddingSize");
     if (!cJSON_IsNumber(embeddingSize_raw)){
         if (new){
-            printf("[Config] [Fatal] embeddingSize is missing/corrutped.\n");
+            printf("[Config] [Fatal] embeddingSize is missing/corrupted.\n");
             return 1;
         }
         else{
@@ -1895,7 +1924,7 @@ parse_config:
                     return 1;
                 }
                 else{
-                    printf("[Config] [Warning] embeddingSize is supposed to be >= 1 but it is set to %d, but you are loading a model, not creating a new one therefore this can be ignored.\n");
+                    printf("[Config] [Warning] embeddingSize is supposed to be >= 1 but it is set to %d, but you are loading a model, not creating a new one therefore this can be ignored.\n", (int)(embeddingSize_raw->valuedouble));
                 }
             }
             else{
@@ -1913,7 +1942,7 @@ parse_config:
     int layersAmount = -1;
     if (!cJSON_IsNumber(layersAmount_raw)){
         if (new){
-            printf("[Config] [Fatal] layersAmount is missing/corrutped.\n");
+            printf("[Config] [Fatal] layersAmount is missing/corrupted.\n");
             return 1;
         }
         else{
@@ -1937,7 +1966,7 @@ parse_config:
                     return 1;
                 }
                 else{
-                    printf("[Config] [Warning] layersAmount is supposed to be >= 1 but it is set to %d, but you are loading a model, not creating a new one therefore this can be ignored.\n");
+                    printf("[Config] [Warning] layersAmount is supposed to be >= 1 but it is set to %d, but you are loading a model, not creating a new one therefore this can be ignored.\n", (int)(layersAmount_raw->valuedouble));
                 }
             }
             else{
@@ -1954,7 +1983,7 @@ parse_config:
     cJSON* heads_raw = cJSON_GetObjectItem(config, "heads");
     if (!cJSON_IsNumber(heads_raw)){
         if (new){
-            printf("[Config] [Fatal] heads is missing/corrutped.\n");
+            printf("[Config] [Fatal] heads is missing/corrupted.\n");
             return 1;
         }
         else{
@@ -1978,7 +2007,7 @@ parse_config:
                     return 1;
                 }
                 else{
-                    printf("[Config] [Warning] heads is supposed to be >= 1 but it is set to %d, but you are loading a model, not creating a new one therefore this can be ignored.\n");
+                    printf("[Config] [Warning] heads is supposed to be >= 1 but it is set to %d, but you are loading a model, not creating a new one therefore this can be ignored.\n", (int)(heads_raw->valuedouble));
                 }
             }
             else{
@@ -2001,7 +2030,7 @@ parse_config:
     double lr_reduce_amount = 0xdeadbeef;
     if (!cJSON_IsNumber(learningRateDecay_raw)){
         if (do_train || do_pretrain){
-            printf("[Config] [Fatal] learningRateDecay is missing/corrutped.\n");
+            printf("[Config] [Fatal] learningRateDecay is missing/corrupted.\n");
             return 1;
         }
         else{
@@ -2034,7 +2063,7 @@ parse_config:
 
     if (!cJSON_IsNumber(learningRateDecayPatience_raw)){
         if (do_train || do_pretrain){
-            printf("[Config] [Fatal] learningRateDecayPatience is missing/corrutped.\n");
+            printf("[Config] [Fatal] learningRateDecayPatience is missing/corrupted.\n");
             return 1;
         }
         else{
@@ -2236,7 +2265,7 @@ after_config_parse:
     }
     free(vocab_file);
     if (!cJSON_IsArray(vocab)){
-        printf("Vocabulary is corrutped.\n");
+        printf("Vocabulary is corrupted.\n");
         return 1;
     }
     printf("Parsed vocabulary.\n");
@@ -3547,13 +3576,13 @@ after_config_parse:
     }
 
     size_t param_total = (size_t)(
-        vocab_len*embeddingSize + vocab_len +
-        layersAmount * (
-            4*embeddingSize +
-            heads*3*(head_dim*embeddingSize + head_dim) +
-            embeddingSize*head_dim*heads + embeddingSize +
-            3*embeddingSize*embeddingSize*ffnGrowSize +
-            2*embeddingSize*ffnGrowSize + embeddingSize
+        (size_t)(vocab_len)*(size_t)(embeddingSize) + (size_t)(vocab_len) +
+        (size_t)(layersAmount) * (size_t)(
+            (size_t)(4)*(size_t)(embeddingSize) +
+            (size_t)(heads)*(size_t)(3)*(size_t)((size_t)(head_dim)*(size_t)(embeddingSize) + (size_t)(head_dim)) +
+            (size_t)(embeddingSize)*(size_t)(head_dim)*(size_t)(heads) + (size_t)(embeddingSize) +
+            (size_t)(3)*(size_t)(embeddingSize)*(size_t)(embeddingSize)*(size_t)(ffnGrowSize) +
+            (size_t)(2)*(size_t)(embeddingSize)*(size_t)(ffnGrowSize) + (size_t)(embeddingSize)
         )
     );
     
@@ -3937,6 +3966,7 @@ after_opt_select:
 
             if (!write_param_to_zip(normalize_path, layers[index].weights.normalize_1, embeddingSize)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                free(model_meta_save);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
@@ -3945,6 +3975,7 @@ after_opt_select:
 
             if (!write_param_to_zip(normalize_path, layers[index].weights.normalize_2, embeddingSize)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                free(model_meta_save);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
@@ -3957,6 +3988,7 @@ after_opt_select:
 
                 if (!write_param_to_zip(head_data_path, layers[index].weights.attention.heads[subindex].query, head_dim * embeddingSize)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                    free(model_meta_save);
                     mz_zip_writer_end(&zipfile);
                     return false;
                 }
@@ -3964,6 +3996,7 @@ after_opt_select:
                 sprintf(head_data_path, "layers[%s].weights.attention.heads[%s].key", _num, _num2);
                 if (!write_param_to_zip(head_data_path, layers[index].weights.attention.heads[subindex].key, head_dim * embeddingSize)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                    free(model_meta_save);
                     mz_zip_writer_end(&zipfile);
                     return false;
                 }
@@ -3971,6 +4004,7 @@ after_opt_select:
                 sprintf(head_data_path, "layers[%s].weights.attention.heads[%s].value", _num, _num2);
                 if (!write_param_to_zip(head_data_path, layers[index].weights.attention.heads[subindex].value, head_dim * embeddingSize)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                    free(model_meta_save);
                     mz_zip_writer_end(&zipfile);
                     return false;
                 }
@@ -3980,6 +4014,7 @@ after_opt_select:
             sprintf(attn_o_path, "layers[%s].weights.attention.output", _num);
             if (!write_param_to_zip(attn_o_path, layers[index].weights.attention.output, embeddingSize * (head_dim * heads))){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                free(model_meta_save);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
@@ -3988,6 +4023,7 @@ after_opt_select:
             sprintf(ffw_paths, "layers[%s].weights.feed_forward.grow", _num);
             if (!write_param_to_zip(ffw_paths, layers[index].weights.feed_forward.grow, embeddingSize * (embeddingSize * ffnGrowSize))){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                free(model_meta_save);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
@@ -3995,6 +4031,7 @@ after_opt_select:
             sprintf(ffw_paths, "layers[%s].weights.feed_forward.gate", _num);
             if (!write_param_to_zip(ffw_paths, layers[index].weights.feed_forward.gate, embeddingSize * (embeddingSize * ffnGrowSize))){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                free(model_meta_save);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
@@ -4002,6 +4039,7 @@ after_opt_select:
             sprintf(ffw_paths, "layers[%s].weights.feed_forward.shrink", _num);
             if (!write_param_to_zip(ffw_paths, layers[index].weights.feed_forward.shrink, embeddingSize * (embeddingSize * ffnGrowSize))){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                free(model_meta_save);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
@@ -4013,6 +4051,7 @@ after_opt_select:
             sprintf(norm_b_path, "layers[%s].biases.normalize_1", _num);
             if (!write_param_to_zip(norm_b_path, layers[index].biases.normalize_1, embeddingSize)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
+                free(model_meta_save);
                 mz_zip_writer_end(&zipfile);
                 return false;
             }
@@ -4020,6 +4059,7 @@ after_opt_select:
             if (!write_param_to_zip(norm_b_path, layers[index].biases.normalize_2, embeddingSize)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
+                free(model_meta_save);
                 return false;
             }
             for (int subindex = 0; subindex < heads; subindex++){
@@ -4031,6 +4071,7 @@ after_opt_select:
                 if (!write_param_to_zip(head_data_path, layers[index].biases.attention.heads[subindex].query, head_dim)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
+                    free(model_meta_save);
                     return false;
                 }
 
@@ -4038,6 +4079,7 @@ after_opt_select:
                 if (!write_param_to_zip(head_data_path, layers[index].biases.attention.heads[subindex].key, head_dim)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
+                    free(model_meta_save);
                     return false;
                 }
 
@@ -4045,6 +4087,7 @@ after_opt_select:
                 if (!write_param_to_zip(head_data_path, layers[index].biases.attention.heads[subindex].value, head_dim)){
                     printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                     mz_zip_writer_end(&zipfile);
+                    free(model_meta_save);
                     return false;
                 }
             }
@@ -4054,6 +4097,7 @@ after_opt_select:
             if (!write_param_to_zip(attn_o_path_, layers[index].biases.attention.output, embeddingSize)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
+                free(model_meta_save);
                 return false;
             }
 
@@ -4062,6 +4106,7 @@ after_opt_select:
             if (!write_param_to_zip(ffw_paths_, layers[index].biases.feed_forward.grow, (embeddingSize * ffnGrowSize))){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
+                free(model_meta_save);
                 return false;
             }
 
@@ -4069,6 +4114,7 @@ after_opt_select:
             if (!write_param_to_zip(ffw_paths_, layers[index].biases.feed_forward.gate, (embeddingSize * ffnGrowSize))){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
+                free(model_meta_save);
                 return false;
             }
 
@@ -4076,6 +4122,7 @@ after_opt_select:
             if (!write_param_to_zip(ffw_paths_, layers[index].biases.feed_forward.shrink, embeddingSize)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
+                free(model_meta_save);
                 return false;
             }
         }
@@ -4089,6 +4136,7 @@ after_opt_select:
             if (!write_param_to_zip(embeddingPath, embeddings[index], embeddingSize)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
+                free(model_meta_save);
                 return false;
             }
         }
@@ -4106,6 +4154,7 @@ after_opt_select:
             }, embeddingSize)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
+                free(model_meta_save);
                 return false;
             }
 
@@ -4117,6 +4166,7 @@ after_opt_select:
             }, 1)){
                 printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
                 mz_zip_writer_end(&zipfile);
+                free(model_meta_save);
                 return false;
             }
         }
@@ -4124,6 +4174,7 @@ after_opt_select:
         if (!mz_zip_writer_finalize_archive(&zipfile)) {
             printf("Failed to save model at path \"%s\". Common causes are: Not enough storage space or no permissions.\n", filepath);
             mz_zip_writer_end(&zipfile);
+            free(model_meta_save);
             return false;
         }
 
@@ -6299,10 +6350,10 @@ after_opt_select:
             update_param(&vocab_projection.weights, grad->vocab_projection.weights.param, vocab_len * embeddingSize, grad_scale);
             update_param(&vocab_projection.biases, grad->vocab_projection.biases.param, vocab_len, grad_scale);
 
-            for (int index = 0; index < grad->seq_len; index++){
+            for (int tok_idx = 0; tok_idx < grad->seq_len; tok_idx++){
                 int tok_id = -1;
                 if (grad->tokenized){
-                    tok_id = grad->tokenized[index];
+                    tok_id = grad->tokenized[tok_idx];
                 }
                 if (tok_id < 0){
                     continue;
@@ -6310,7 +6361,7 @@ after_opt_select:
                 if (tok_id >= vocab_len){
                     continue;
                 }
-                update_param(&embeddings[tok_id], grad->embedding_grads[index], embeddingSize, grad_scale);
+                update_param(&embeddings[tok_id], grad->embedding_grads[tok_idx], embeddingSize, grad_scale);
             }
 
             free_train_step_ret(*grad);
@@ -7393,7 +7444,7 @@ after_opt_select:
                 printf("Flushing remaining worker tasks (if any)...\n");
                 long long timer_remaining = timer();
                 float loss_avr_remaining = flush_worker_tasklist(); //If there are any additional things left for some reason
-                if (!loss_avr_remaining == -1){
+                if (loss_avr_remaining == -1){
                     printf("There weren't any remaining worker tasks to flush (found out in %lldms).\n", timer_end(timer_remaining));
                 }
                 else{
