@@ -3,6 +3,18 @@ if test (id -u) -ne 0
     exit 1
 end
 
+if not test "$argv[1]" = uninstall
+    if not test "$argv[1]" = ""
+        echo ------------------------
+        echo "|         Help         |"
+        echo ------------------------
+        echo "Usage:"
+        echo "  fish install.fish           -- to install."
+        echo "  fish install.fish uninstall -- to uninstall."
+        exit 1
+    end
+end
+
 function compile
     set gcc_command gcc
     set build_type "$argv[1]"
