@@ -1,3 +1,5 @@
+#!/usr/bin/fish
+
 if test (id -u) -ne 0
     echo "You need to run this script as root, use sudo."
     exit 1
@@ -68,7 +70,7 @@ function compile
             if test "$status_store" = 1
                 if $gcc_command --version | grep -q clang
                     echo "Gcc failed to compile because clang is pretending to be gcc, input real gcc command to compile or 'exit' to exit."
-                    read -P "Real gcc command (anything or 'exit') " prompt_ans
+                    read -P "Real gcc command (anything or 'exit') " prompt_ans </dev/tty
                     if test "$prompt_ans" = exit
                         echo "Exiting..."
                         exit 0
@@ -97,7 +99,7 @@ function compile
             if test "$status_store" = 1
                 if $gcc_command --version | grep -q clang
                     echo "Gcc failed to compile because clang is pretending to be gcc, input real gcc command to compile or 'exit' to exit."
-                    read -P "Real gcc command (anything or 'exit') " prompt_ans
+                    read -P "Real gcc command (anything or 'exit') " prompt_ans </dev/tty
                     if test "$prompt_ans" = exit
                         echo "Exiting..."
                         exit 0
@@ -132,7 +134,7 @@ end
 if not test -f cleanai.c
     echo "cleanai.c not found."
     while true
-        read -P "Do you wish to clone the repo? (y/n) " prompt_ans
+        read -P "Do you wish to clone the repo? (y/n) " prompt_ans </dev/tty
         if test "$prompt_ans" = y
             echo "+ time git clone https://github.com/willmil11/cleanai-c.git"
             time git clone https://github.com/willmil11/cleanai-c.git
@@ -165,7 +167,7 @@ end
 if not test -f vocabulary.json
     echo "vocabulary.json not found."
     while true
-        read -P "Do you wish to clone the repo? (y/n) " prompt_ans
+        read -P "Do you wish to clone the repo? (y/n) " prompt_ans </dev/tty
         if test "$prompt_ans" = y
             echo "+ time git clone https://github.com/willmil11/cleanai-c.git"
             time git clone https://github.com/willmil11/cleanai-c.git
