@@ -1,38 +1,68 @@
-# Cleanai-c in-dev 0.0.20
+# Cleanai-c 1.0.0
 
 ## What's this?
-I'm the guy that made <a href="https://github.com/willmil11/cleanai">cleanai</a> which is basically javascript pytorch made from scratch with no machine learning librairies. Except I originally made that one as a python library then translated it to js for speed then added a cli arround it etc. It is very unclean and pretty slow, therefore I decided to make this version in c with better design choices.
+I'm the guy that made <a href="https://github.com/willmil11/cleanai">cleanai</a> which is basically javascript pytorch made from scratch with no machine learning libraries. Except I originally made that one as a python library then translated it to js for speed then added a cli around it etc. It is very unclean and pretty slow, therefore I decided to make this version in c with better design choices.
 
 ## Who are you?
 I am willmil11, a 15 year old french self taught dev.
 
 ## Why are you doing this?
-I tought about how cleanai's codebase is pure hot steaming garbage and decided to remake it but in C.
+I thought about how cleanai's codebase is pure hot steaming garbage and decided to remake it but in C.
 
 ## How long have you been working on this?
-I've been working on the <a href="https://github.com/willmil11/cleanai">original cleanai repo</a> for almost 11 months (although realistically I stopped working on it since 6 months ago so more like 5 months). And I've been working on this repo you're on right now for about 4 months. (Note that this information is true today, dec. 12 2025 but will change in the future, that is how time works.)
+I've been working on the <a href="https://github.com/willmil11/cleanai">original cleanai repo</a> for almost 11 months (although realistically I stopped working on it since 6 months ago so more like 5 months). And I've been working on this repo you're on right now for about 4.5 months. (Note that this information is true today, dec. 23 2025 but will change in the future, that is how time works.)
+
+## How to install?
+Make sure you have the fish shell, gcc, curl and git installed then just run
+```bash
+curl https://raw.githubusercontent.com/willmil11/cleanai-c/refs/heads/main/install.fish | sudo fish
+```
+<strong>Note:</strong> If you're on windows make sure to use wsl2, I dropped native windows support but wsl2 gives you linux on windows with almost native cpu speed and its from microsoft so it works well with windows.
+<br>
+<strong>Note 2:</strong> If you are paranoid about viruses just check out the script before actually running it.
+
+## How to uninstall
+Same requirements as to install but run this instead:
+```bash
+curl https://raw.githubusercontent.com/willmil11/cleanai-c/refs/heads/main/install.fish | sudo fish uninstall
+```
 
 ## How to use?
-<strong>Automatic way</strong>
-<br>
-Make sure you have the fish shell installed, then just:
+Literally just run
 ```bash
-fish compile.fish help
+cleanai
 ```
-And normally the script will display an easy to understand help message, the script is actually super super simple to use so just run the help command like I showed you and you'll understand pretty much immediately.
-<br>
-<i>Note: script requires gcc and fish shell, obviously.</i>
-<br>
-<br>
-<strong>Manual way</strong>
-<br>
-You can compile the code manually with
-```bash
-gcc -O3 -march=native -ffast-math cleanai.c -o cleanai -lm -pthread
+And the help message should be intuitive enough to know how to use the tool. But the general flow is get data to pre-train and train then use the --init-config flag like the help message says to build your config then use that config to pre-train and train your model.
+
+## Some basic knowledge
+### Tokenization
+Tokenization is the process of taking some data often text and breaking it into pieces, words called tokens the model can understand. Every input to the model is tokenized and the output also being in tokens is turned back into text.
+### Pre-training
+When creating a model you'll want to pre-train first, this means giving files of any type to the model to train the goal is not for the model to learn conversation but more like the general structure of language to make basically an autocomplete on steroids. You can have multiple pre-training datasets to split your data across.
+### Training
+This part, done after pre-training has for goal to make the model use the language skills taught by pre-training to have conversations and behavior and go from autocomplete on steroids to a smart conversationalist. However the files for this are recommended to be .json and must be structured like this:
+```jsonc
+[ //This is the entry list
+    { //This is an entry
+        "system_prompt": "This is the system prompt of the conversation entry",
+        "turns": [ //This is the turn sets list of the entry
+            {
+                "person": "This is what the person would say.",
+                "model": "And this is what we train the model to answer."
+            },
+            //Other turn sets here (last turn set must not have a "," after it)
+        ]
+    },
+    //Other entries here (last entry must not have a "," after it)
+]
 ```
-(You need gcc installed. This code can only be compiled with gcc because it uses gcc only things like nested functions. You can still compile for windows tho because there are builds of gcc that work on windows. You can also cross compile if you remove "-march=native" from your command and use a cross compiler.)
+You can have multiple dataset files to split your data across.
+
+### Good instincts
+If your loss is not really decreasing try to increase your learningRate by a little bit, but if it has been decreasing but now is not anymore try to decrease your learningRate by a bit you might need finer, more precise learning. If your loss reaches 0 it means your model has overfitted (learnt the data perfectly) which is generally bad because you generally want your model to think and not just repeat the dataset, the optimal loss is often between 1 and 2. If after a lot of epochs your loss doesn't decrease despite learningRate adjustments your model might just not have enough capacity, parameters to learn the data well enough, try to raise things like embeddingSize, heads, ffnGrowSize, layers, etc... Also for epoch number, I recommend choosing a very high number you'll probably never reach because you can always stop training in the checkpoint clis every epoch.
 
 ## Version history
+- 1.0.0: Changed compile.fish to install.fish, added better vocabulary file logic to make it work with real installs, removed windows support because people can just use wsl2 and windows native is a nightmare and updated README.
 - in-dev 0.0.20: Fixed bugs.
 - in-dev 0.0.19: Improved eta display.
 - in-dev 0.0.18: Fixed a few memory leaks and improved some printfs.

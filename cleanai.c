@@ -23,83 +23,7 @@
 float lr_plateau_best_loss = __FLT_MAX__;
 int lr_plateau_counter = 0;
 
-#ifdef _WIN32 //windows compability is pain ;(
-#include <windows.h>
-#include <conio.h>
-#include <tlhelp32.h>
-
-long long time_ms(){
-    FILETIME ft;
-    GetSystemTimeAsFileTime(&ft);
-    ULARGE_INTEGER uli;
-    uli.LowPart = ft.dwLowDateTime;
-    uli.HighPart = ft.dwHighDateTime;
-    return (long long)(uli.QuadPart / 10000);
-}
-
-char* input_with_timeout(char* qry, int timeout_ms){
-    printf("%s", qry);
-    fflush(stdout);
-    
-    char* buff = malloc(4096);
-    if (!buff) {
-        printf("Failed to allocate memory to read input.\n");
-        return NULL;
-    }
-    
-    int pos = 0;
-    long long start_time = time_ms();
-    
-    while (pos < 4095) {
-        if (_kbhit()) {
-            int k = _getch();
-            if (k == 0 || k == 0xE0) { (void)_getch(); continue; }
-            char c = (char)k;
-            
-            if (c == '\r' || c == '\n') {
-                putchar('\n');
-                buff[pos] = '\0';
-                return buff;
-            } else if (c == '\b' && pos > 0) {
-                printf("\b \b");
-                pos--;
-            } else if (c >= 32 && c <= 126) {
-                putchar(c);
-                buff[pos++] = c;
-            }
-        }
-        
-        if (time_ms() - start_time >= timeout_ms) {
-            free(buff);
-            return NULL;
-        }
-        
-        Sleep(1);
-    }
-    
-    buff[pos] = '\0';
-    return buff;
-}
-
-typedef HANDLE Thread;
-typedef DWORD THREAD_RETURN;
-#define THREAD_CALL WINAPI
-
-#define thread_start(fn, arg, out_thread)                     \
-    do {                                                      \
-        out_thread = CreateThread(NULL, 0, fn, arg, 0, NULL); \
-    } while (0)
-
-#define thread_join(thread, ret_ptr)                \
-    do {                                            \
-        WaitForSingleObject(thread, INFINITE);      \
-        DWORD code;                                 \
-        GetExitCodeThread(thread, &code);           \
-        CloseHandle(thread);                        \
-        *(void**)ret_ptr = (void*)code;             \
-    } while (0)
-
-#else
+//windows compability is pain ;( //1.0.0 update: which is why we are dropping it
 #include <sys/time.h>
 #include <sys/select.h>
 #include <unistd.h>
@@ -163,35 +87,16 @@ char* input_with_timeout(char* qry, int timeout_ms){
 
 #include <pthread.h>
 
-typedef pthread_t Thread;
-typedef void* THREAD_RETURN;
-#define THREAD_CALL
-
-#define thread_start(fn, arg, out_thread)               \
-    do {                                                \
-        pthread_create(&out_thread, NULL, fn, arg);     \
-    } while (0)
-
-#define thread_join(thread, ret_ptr)                \
-    do {                                            \
-        pthread_join(thread, (void**)ret_ptr);      \
-    } while (0)
-
-#endif
 int itoa(int value, char* buff, int base){
     //fuck base
     return sprintf(buff, "%d", value);
 }
 
 void sleep_ms(unsigned int ms) {
-#ifdef _WIN32
-    Sleep(ms);
-#else
     struct timespec ts;
     ts.tv_sec  = ms / 1000;
     ts.tv_nsec = (ms % 1000) * 1000000;
     nanosleep(&ts, NULL);
-#endif
 }
 
 char* input(char* qry){
@@ -360,26 +265,14 @@ bool file_write(char* path, char* content) {
     return written == len;
 }
 
-#ifdef _WIN32
-    HANDLE timer_mutex = NULL;
-    HANDLE id_mutex = NULL;
-    void init_timer_mutex() {
-        timer_mutex = CreateMutexA(NULL, FALSE, NULL);
-        id_mutex = CreateMutexA(NULL, FALSE, NULL);
-    }
-    void lock_timer() { WaitForSingleObject(timer_mutex, INFINITE); }
-    void unlock_timer() { ReleaseMutex(timer_mutex); }
-    void lock_id() { WaitForSingleObject(id_mutex, INFINITE); }
-    void unlock_id() { ReleaseMutex(id_mutex); }
-#else
-    pthread_mutex_t timer_mutex = PTHREAD_MUTEX_INITIALIZER;
-    pthread_mutex_t id_mutex = PTHREAD_MUTEX_INITIALIZER;
-    void init_timer_mutex() {}
-    void lock_timer() { pthread_mutex_lock(&timer_mutex); }
-    void unlock_timer() { pthread_mutex_unlock(&timer_mutex); }
-    void lock_id() { pthread_mutex_lock(&id_mutex); }
-    void unlock_id() { pthread_mutex_unlock(&id_mutex); }
-#endif
+
+pthread_mutex_t timer_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t id_mutex = PTHREAD_MUTEX_INITIALIZER;
+void init_timer_mutex() {}
+void lock_timer() { pthread_mutex_lock(&timer_mutex); }
+void unlock_timer() { pthread_mutex_unlock(&timer_mutex); }
+void lock_id() { pthread_mutex_lock(&id_mutex); }
+void unlock_id() { pthread_mutex_unlock(&id_mutex); }
 
 int main(int argc, char** argv){
     init_timer_mutex();
@@ -399,11 +292,6 @@ int main(int argc, char** argv){
         int id;
         while (true){
             // Thread-safe random
-            #ifdef _WIN32
-            unsigned int rand_val;
-            rand_s(&rand_val);
-            id = rand_val % 100000;
-            #else
             static __thread unsigned int tls_seed = 0;
             static __thread bool tls_seed_init = false;
             if (!tls_seed_init) {
@@ -411,7 +299,6 @@ int main(int argc, char** argv){
                 tls_seed_init = true;
             }
             id = rand_r(&tls_seed) % 100000;
-            #endif
 
             if (!ids){
                 unlock_id();
@@ -2250,8 +2137,43 @@ after_config_parse:
         printf("Calculated weight initalisation range with he init.\n");
     }
 
-    printf("Reading vocabulary file (vocabulary.json)...\n");
-    char* vocab_file = read_file("vocabulary.json");
+    #include <unistd.h>
+    #include <limits.h>
+
+    char* get_file_loc_relative_to_bin(const char* filename) {
+        static char file_path[4096];
+        char exe_path[4096];
+        
+        ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+        exe_path[len] = '\0';
+        char *last_slash = strrchr(exe_path, '/');
+        
+        if (last_slash) {
+            *last_slash = '\0';
+        }
+        
+        sprintf(file_path, "%s/%s", exe_path, filename);
+        return file_path;
+    }
+
+    printf("Checking vocabulary file locations...\n");
+    char* vocab_file_loc = get_file_loc_relative_to_bin("vocabulary.json");
+    if (file_exists(vocab_file_loc)){
+        printf("Found vocabulary file at '%s'.\n", vocab_file_loc);
+    }
+    else{
+        if (file_exists("/usr/share/cleanai/vocabulary.json")){
+            printf("Found vocabulary file at '/usr/share/cleanai/vocabulary.json'.\n");
+            vocab_file_loc = "/usr/share/cleanai/vocabulary.json";
+        }
+        else{
+            printf("Couldn't find vocabulary file.\n");
+            return 1;
+        }
+    }
+
+    printf("Reading vocabulary file...\n");
+    char* vocab_file = read_file(vocab_file_loc);
     if (!vocab_file){
         printf("Failed to read vocabulary file.\n");
         return 1;
@@ -6133,7 +6055,7 @@ after_opt_select:
         size_t mask_len;
     } threadData;
 
-    THREAD_RETURN THREAD_CALL workerThread(void* arg){
+    void* workerThread(void* arg){
         threadData* data_ptr = arg;
         threadData data = *data_ptr;
         free(data_ptr);
@@ -6185,7 +6107,7 @@ after_opt_select:
     train_step_ret** worker_gradients = NULL;
     int worker_gradients_len = 0;
 
-    Thread* worker_threads = NULL;
+    pthread_t* worker_threads = NULL;
     int worker_threads_len = 0;
 
     void apply_worker_gradients(){
@@ -6408,14 +6330,14 @@ after_opt_select:
                 data->mask = worker_tasklist[index].mask;
                 data->mask_len = worker_tasklist[index].mask_len;
 
-                Thread thread;
+                pthread_t thread;
                 worker_threads_len++;
-                worker_threads = realloc(worker_threads, worker_threads_len * sizeof(Thread));
+                worker_threads = realloc(worker_threads, worker_threads_len * sizeof(pthread_t));
                 if (!worker_threads){
                     printf("Failed to allocate memory to store worker threads.\n");
                     exit(1);
                 }
-                thread_start(workerThread, data, thread);
+                pthread_create(&thread, NULL, workerThread, data);
                 worker_threads[worker_write_idx] = thread;
 
                 worker_write_idx++;
@@ -6424,7 +6346,7 @@ after_opt_select:
             worker_write_idx = 0;
             for (int index = worker_tasklist_len - 1; index >= lower_cpy_idx; index--){
                 train_step_ret* rets = 0;
-                thread_join(worker_threads[worker_write_idx], &rets);
+                pthread_join(worker_threads[worker_write_idx], (void**)(&rets));
 
                 worker_gradients[previous_worker_gradients_len + worker_write_idx] = rets;
                 worker_write_idx++;
