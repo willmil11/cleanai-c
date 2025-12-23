@@ -18,24 +18,15 @@ if not test "$argv[1]" = uninstall
 end
 
 if not isatty stdin
-    echo "No stdin, redownloading and respawning..."
-    set temp_script (mktemp)
-    curl https://raw.githubusercontent.com/willmil11/cleanai-c/refs/heads/main/install.fish -o "$temp_script"
-    set status_store "$status"
-    if test "$status_store" = 127
-        echo "Curl not found, exiting..."
-        exit 1
-    else
-        if test "$status_store" != 0
-            echo "Curl error ($status_store exit code), exiting..."
-            exit 1
-        end
-    end
-    echo "Downloading, spawning..."
-    fish $temp_script $argv
-    set exit_code $status
-    rm $temp_script
-    exit $exit_code
+    echo "No stdin, this probably means you piped the script to fish, please run this instead:"
+    echo "  curl https://raw.githubusercontent.com/willmil11/cleanai-c/refs/heads/main/install.fish -o install.fish"
+    echo "  fish install.fish"
+    echo ""
+    echo "Also if you don't want to pollute your filesystem with this file run this first:"
+    echo "  cd \$(mktemp -d)"
+    echo "This will put you in a unique directory generated in /tmp/"
+    echo "Exiting..."
+    exit 1
 end
 
 function compile

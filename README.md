@@ -15,7 +15,9 @@ I've been working on the <a href="https://github.com/willmil11/cleanai">original
 ## How to install?
 Make sure you have the fish shell, gcc, curl and git installed then just run
 ```bash
-curl https://raw.githubusercontent.com/willmil11/cleanai-c/refs/heads/main/install.fish | sudo fish
+cd $(mktemp -d) #To not pollute your filesystem
+curl https://raw.githubusercontent.com/willmil11/cleanai-c/refs/heads/main/install.fish -o install.fish #To download the script
+sudo fish install.fish #To run the script with no flags (install)
 ```
 <strong>Note:</strong> If you're on windows make sure to use wsl2, I dropped native windows support but wsl2 gives you linux on windows with almost native cpu speed and its from microsoft so it works well with windows.
 <br>
@@ -24,7 +26,9 @@ curl https://raw.githubusercontent.com/willmil11/cleanai-c/refs/heads/main/insta
 ## How to uninstall
 Same requirements as to install but run this instead:
 ```bash
-curl https://raw.githubusercontent.com/willmil11/cleanai-c/refs/heads/main/install.fish | sudo fish uninstall
+cd $(mktemp -d) #To not pollute your filesystem
+curl https://raw.githubusercontent.com/willmil11/cleanai-c/refs/heads/main/install.fish -o install.fish #To download the script
+sudo fish install.fish uninstall #To run the script with the uninstall flag
 ```
 
 ## How to use?
