@@ -152,6 +152,9 @@ if test "$argv[1]" = uninstall
     exit 0
 end
 
+set temp_dir (mktemp -d)
+cd "$temp_dir"
+
 if not test -f cleanai.c
     echo "cleanai.c not found."
     while true
