@@ -17,6 +17,27 @@ if not test "$argv[1]" = uninstall
     end
 end
 
+if not isatty stdin
+    echo "No stdin, redownloading and respawning..."
+    set temp_script (mktemp)
+    curl https://raw.githubusercontent.com/willmil11/cleanai-c/refs/heads/main/install.fish -o "$temp_script"
+    set status_store "$status"
+    if test "$status_store" = 127
+        echo "Curl not found, exiting..."
+        exit 1
+    else
+        if test "$status_store" != 0
+            echo "Curl error ($status_store exit code), exiting..."
+            exit 1
+        end
+    end
+    echo "Downloading, spawning..."
+    fish $temp_script $argv
+    set exit_code $status
+    rm $temp_script
+    exit $exit_code
+end
+
 function compile
     set gcc_command gcc
     set build_type "$argv[1]"
@@ -70,7 +91,7 @@ function compile
             if test "$status_store" = 1
                 if $gcc_command --version | grep -q clang
                     echo "Gcc failed to compile because clang is pretending to be gcc, input real gcc command to compile or 'exit' to exit."
-                    read -P "Real gcc command (anything or 'exit') " prompt_ans </dev/tty
+                    read -P "Real gcc command (anything or 'exit') " prompt_ans
                     if test "$prompt_ans" = exit
                         echo "Exiting..."
                         exit 0
@@ -99,7 +120,7 @@ function compile
             if test "$status_store" = 1
                 if $gcc_command --version | grep -q clang
                     echo "Gcc failed to compile because clang is pretending to be gcc, input real gcc command to compile or 'exit' to exit."
-                    read -P "Real gcc command (anything or 'exit') " prompt_ans </dev/tty
+                    read -P "Real gcc command (anything or 'exit') " prompt_ans
                     if test "$prompt_ans" = exit
                         echo "Exiting..."
                         exit 0
@@ -134,7 +155,7 @@ end
 if not test -f cleanai.c
     echo "cleanai.c not found."
     while true
-        read -P "Do you wish to clone the repo? (y/n) " prompt_ans </dev/tty
+        read -P "Do you wish to clone the repo? (y/n) " prompt_ans
         if test "$prompt_ans" = y
             echo "+ time git clone https://github.com/willmil11/cleanai-c.git"
             time git clone https://github.com/willmil11/cleanai-c.git
@@ -167,7 +188,7 @@ end
 if not test -f vocabulary.json
     echo "vocabulary.json not found."
     while true
-        read -P "Do you wish to clone the repo? (y/n) " prompt_ans </dev/tty
+        read -P "Do you wish to clone the repo? (y/n) " prompt_ans
         if test "$prompt_ans" = y
             echo "+ time git clone https://github.com/willmil11/cleanai-c.git"
             time git clone https://github.com/willmil11/cleanai-c.git
