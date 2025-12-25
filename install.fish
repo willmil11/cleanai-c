@@ -119,7 +119,7 @@ if test "$argv[1]" = uninstall
         echo "+ rm /usr/bin/cleanai-blas"
         rm /usr/bin/cleanai-blas
     end
-    if test -h /usr/bin/cleanai
+    if test -h /usr/bin/cleanai; or test -f /usr/bin/cleanai
         echo "+ rm /usr/bin/cleanai"
         rm /usr/bin/cleanai
     end
