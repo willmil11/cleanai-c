@@ -248,6 +248,7 @@ void help(char* issue){
     printf("                                                              [--pretrain]\n");
     printf("                                                                          [--train]\n");
     printf("        --init-config path/to/new/config.json\n");
+    printf("        --version\n");
     printf("\n");
     printf("Note: Arguments between square brackets ([...]) are optional.\n");
 }
