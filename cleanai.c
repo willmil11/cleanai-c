@@ -22,6 +22,17 @@
 #include "libs/miniz.h"
 #include "libs/miniz.c"
 
+#undef can_read
+
+#define MG_ENABLE_LOG 0
+#define MG_TLS MG_TLS_BUILTIN
+#define MG_ENABLE_IPV6 1
+
+#include "libs/mongoose.h"
+#include "libs/mongoose.c"
+
+#include ".current_cleanai_version"
+
 //Customisation
 #define eta_pause_toggle true //Eta will pause program for eta_pause_time_ms for you to see eta
 #define eta_pause_time_ms 1000 //Time to pause
@@ -498,6 +509,118 @@ int main(int argc, char** argv){
     argv = nargv;
     argc--;
 
+    struct fetch_data {
+        char *result;
+        int done;
+        const char *url;
+    };
+
+    void fetch_callback(struct mg_connection *c, int ev, void *ev_data) {
+        struct fetch_data *data = (struct fetch_data *) c->fn_data;
+        
+        if (ev == MG_EV_CONNECT) {
+            // Init TLS for HTTPS
+            struct mg_tls_opts opts = {.ca = NULL};  // NULL = no cert verification
+            mg_tls_init(c, &opts);
+        } else if (ev == MG_EV_TLS_HS) {
+            // TLS handshake complete, now send request
+            struct mg_str host = mg_url_host(data->url);
+            mg_printf(c,
+                "GET %s HTTP/1.1\r\n"
+                "Host: %.*s\r\n"
+                "Connection: close\r\n"
+                "\r\n",
+                mg_url_uri(data->url),
+                (int) host.len, host.buf);
+        } else if (ev == MG_EV_HTTP_MSG) {
+            struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+            
+            if (mg_http_status(hm) != 200) {
+                data->done = 1;
+                c->is_closing = 1;
+                return;
+            }
+            
+            data->result = malloc(hm->body.len + 1);
+            if (data->result != NULL) {
+                memcpy(data->result, hm->body.buf, hm->body.len);
+                data->result[hm->body.len] = '\0';
+            }
+            data->done = 1;
+            c->is_closing = 1;
+        } else if (ev == MG_EV_ERROR) {
+            data->done = 1;
+        }
+    }
+
+    char* fetch_url(const char* url) {
+        struct mg_mgr mgr;
+        struct fetch_data data = {NULL, 0, url};
+        
+        mg_mgr_init(&mgr);
+        mg_http_connect(&mgr, url, fetch_callback, &data);
+        
+        int timeout_iterations = 50;
+        while (!data.done && mgr.conns != NULL && timeout_iterations > 0) {
+            mg_mgr_poll(&mgr, 100);
+            timeout_iterations--;
+        }
+        
+        mg_mgr_free(&mgr);
+        return data.result;
+    }
+
+    printf("Checking for updates...\n");
+    char* latest_cleanai_version_rcv = fetch_url("https://raw.githubusercontent.com/willmil11/cleanai-c/refs/heads/main/.current_cleanai_version");
+    if (!latest_cleanai_version_rcv){
+        printf("Failed to check for updates, continuing anyways...\n");
+    }
+    else{
+        char* latest_cleanai_version = latest_cleanai_version_rcv;
+        size_t latest_cleanai_version_len = strlen(latest_cleanai_version);
+        if (!(latest_cleanai_version_len >= strlen("#define current_cleanai_version \"x.y.z\""))){
+            printf("Failed to check for updates, continuing anyways...\n");
+        }
+        else{
+            latest_cleanai_version += strlen("#define current_cleanai_version \"");
+            latest_cleanai_version_len -= strlen("#define current_cleanai_version \"");
+            bool corrupted = true;
+            for (int index = 0; index < latest_cleanai_version_len; index++){
+                if (latest_cleanai_version[index] == '"'){
+                    latest_cleanai_version[index] = '\0';
+                    corrupted = false;
+                }
+            }
+            if (corrupted){
+                printf("Failed to check for updates, continuing anyways...\n");
+            }
+            else{
+                if (strcmp(current_cleanai_version, latest_cleanai_version) != 0){
+                    printf("There is an update available (current version: %s, latest: %s), please checkout 'https://github.com/willmil11/cleanai-c' for update instructions.\n", current_cleanai_version, latest_cleanai_version);
+                    while (true){
+                        char* prompt_ans = input("Do you want to exit or continue anyways? (exit/continue) ");
+                        if (!prompt_ans){
+                            printf("Failed to read user input.\n");
+                            return 1;
+                        }
+                        if (strcmp(prompt_ans, "exit") == 0){
+                            return 0;
+                        }
+                        if (strcmp(prompt_ans, "continue") == 0){
+                            printf("Continuing...\n");
+                            break;
+                        }
+                        printf("Invalid input ('exit' to exit or 'continue' to continue ignoring the available update)\n");
+                    }
+                }
+                else{
+                    printf("No updates available.\n");
+                }
+            }
+        }
+        free(latest_cleanai_version_rcv);
+    }
+
     //parse arguments
     if (argc == 1){
         char* arg = argv[0];
@@ -507,7 +630,8 @@ int main(int argc, char** argv){
         }
         else{
             if (strcmp(arg, "--version") == 0){
-                printf("Cleanai v1.1.1 (original edition)\n");
+                printf("Arguments parsed successfully :)\n");
+                printf("Cleanai v%s (original edition)\n", current_cleanai_version);
                 return 0;
             }
         }
