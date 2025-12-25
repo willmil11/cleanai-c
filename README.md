@@ -1,4 +1,4 @@
-# Cleanai-c 1.1.0
+# Cleanai-c 1.1.1
 
 ## What's this?
 I'm the guy that made <a href="https://github.com/willmil11/cleanai">cleanai</a> which is basically javascript pytorch made from scratch with no machine learning libraries. Except I originally made that one as a python library then translated it to js for speed then added a cli around it etc. It is very unclean and pretty slow, therefore I decided to make this version in c with better design choices.
@@ -74,6 +74,7 @@ You can have multiple dataset files to split your data across.
 If your loss is not really decreasing try to increase your learningRate by a little bit, but if it has been decreasing but now is not anymore try to decrease your learningRate by a bit you might need finer, more precise learning. If your loss reaches 0 it means your model has overfitted (learnt the data perfectly) which is generally bad because you generally want your model to think and not just repeat the dataset, the optimal loss is often between 1 and 2. If after a lot of epochs your loss doesn't decrease despite learningRate adjustments your model might just not have enough capacity, parameters to learn the data well enough, try to raise things like embeddingSize, heads, ffnGrowSize, layers, etc... Also for epoch number, I recommend choosing a very high number you'll probably never reach because you can always stop training in the checkpoint clis every epoch.
 
 ## Version history
+- 1.1.1: Added --version flag to help output.
 - 1.1.0: Updated install.fish to be able to update, check deps and auto install them if user agrees with package manager auto detect based on distro, better compile flags, added a blas version of cleanai, both are now compiled and installed by the script as cleanai-blas and cleanai-original and cleanai-blas is symlinked as cleanai so it is the default one as it is faster but they're the same except internal changes for blas. If I sum up way better performance thanks to blas and better install.fish, so now you have cleanai-original (no blas) and cleanai-blas (with blas) and the default cleanai command is now a symlink pointing to cleanai-blas (and they both behave the same except speed).
 - 1.0.0: Changed compile.fish to install.fish, added better vocabulary file logic to make it work with real installs, removed windows support because people can just use wsl2 and windows native is a nightmare and updated README.
 - in-dev 0.0.20: Fixed bugs.
