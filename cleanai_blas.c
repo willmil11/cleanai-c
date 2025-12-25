@@ -670,6 +670,7 @@ int main(int argc, char** argv){
         }
         else{
             if (strcmp(arg, "--version") == 0){
+                printf("Arguments parsed successfully :)\n");
                 printf("Cleanai v%s (blas edition)\n", current_cleanai_version);
                 return 0;
             }
