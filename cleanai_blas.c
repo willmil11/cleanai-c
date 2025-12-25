@@ -547,7 +547,7 @@ int main(int argc, char** argv){
         }
         else{
             if (strcmp(arg, "--version") == 0){
-                printf("Cleanai v1.1.0 (blas edition)\n");
+                printf("Cleanai v1.1.1 (blas edition)\n");
                 return 0;
             }
         }
