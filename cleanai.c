@@ -99,7 +99,7 @@ char* input_with_timeout(char* qry, int timeout_ms){
 }
 
 int itoa(int value, char* buff, int base){
-    //fuck base
+    //no base
     return sprintf(buff, "%d", value);
 }
 
@@ -2371,7 +2371,7 @@ after_config_parse:
     printf("Computing token to id data...\n");
     timer_ = timer();
 
-    typedef struct { //I have joined the dark side of structs.
+    typedef struct {
         char* token;
         int id;
     } TokenEntry;
@@ -6083,7 +6083,6 @@ after_opt_select:
                         attention_score_grad[index][subindex] = d_score;
                     }
 
-                    //Oh the cpu is gonna love that loop fusing
                     for (int subindex = 0; subindex < seq_len; subindex++){
                         if (subindex <= index){
                             float score_grad = attention_score_grad[index][subindex] / scale;
