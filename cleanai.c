@@ -6318,13 +6318,27 @@ after_opt_select:
             bool need_m = use_adam || use_sgdm;
             bool need_v = use_adam;
             ensure_moments(p, count, need_m, need_v);
+            double grad_norm_sq = 0.0;
             for (size_t subindex = 0; subindex < count; subindex++){
                 float g = grad_ptr[subindex] * grad_scale;
+                grad_norm_sq += (double)g * g;
+            }
+            float max_grad_norm = 1.0f;
+            float grad_norm = (float)sqrt(grad_norm_sq);
+            if (isnan(grad_norm) || isinf(grad_norm)) return;
+            float norm_scale = (grad_norm > max_grad_norm) ? (max_grad_norm / grad_norm) : 1.0f;
+            for (size_t subindex = 0; subindex < count; subindex++){
+                float g = grad_ptr[subindex] * grad_scale * norm_scale;
                 if (use_adam){
                     p->m[subindex] = adam_params.beta1 * p->m[subindex] + (1.0f - adam_params.beta1) * g;
                     p->v[subindex] = adam_params.beta2 * p->v[subindex] + (1.0f - adam_params.beta2) * g * g;
-                    float m_hat = p->m[subindex] / (1.0f - powf(adam_params.beta1, adam_params.t));
-                    float v_hat = p->v[subindex] / (1.0f - powf(adam_params.beta2, adam_params.t));
+                    float bias_corr1 = 1.0f - powf(adam_params.beta1, adam_params.t);
+                    float bias_corr2 = 1.0f - powf(adam_params.beta2, adam_params.t);
+                    if (bias_corr1 == 0.0f) bias_corr1 = 1.0f;
+                    if (bias_corr2 == 0.0f) bias_corr2 = 1.0f;
+                    float m_hat = p->m[subindex] / bias_corr1;
+                    float v_hat = p->v[subindex] / bias_corr2;
+                    if (v_hat < 0.0f) v_hat = 0.0f;
                     p->param[subindex] -= lr * m_hat / (sqrtf(v_hat) + adam_params.epsilon);
                 }
                 else{
