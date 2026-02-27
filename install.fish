@@ -44,7 +44,7 @@ function compile
     set -l arch (uname -m)
     set -l os (uname -s)
     # Base flags for all platforms
-    set -l flags -Ofast -funroll-loops -fomit-frame-pointer -flto=auto -fwhole-program -fno-stack-protector -fgraphite-identity -floop-nest-optimize
+    set -l flags -Ofast -fno-finite-math-only -funroll-loops -fomit-frame-pointer -flto=auto -fwhole-program -fno-stack-protector -fgraphite-identity -floop-nest-optimize
     switch $arch
         case x86_64 i686
             # x86/x64 specific
