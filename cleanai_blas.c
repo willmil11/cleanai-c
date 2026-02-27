@@ -6176,14 +6176,18 @@ after_opt_select:
             bool need_v = use_adam;
             ensure_moments(p, count, need_m, need_v);
             double grad_norm_sq = 0.0;
+            double param_norm_sq = 0.0;
             for (size_t subindex = 0; subindex < count; subindex++){
                 float g = grad_ptr[subindex] * grad_scale;
                 grad_norm_sq += (double)g * g;
+                param_norm_sq += (double)p->param[subindex] * p->param[subindex];
             }
-            float max_grad_norm = 1.0f;
             float grad_norm = (float)sqrt(grad_norm_sq);
+            float param_norm = (float)sqrt(param_norm_sq);
             if (isnan(grad_norm) || isinf(grad_norm)) return;
-            float norm_scale = (grad_norm > max_grad_norm) ? (max_grad_norm / grad_norm) : 1.0f;
+            float agc_lambda = 0.01f;
+            float agc_max = agc_lambda * fmaxf(param_norm, 1e-3f);
+            float norm_scale = (grad_norm > agc_max) ? (agc_max / grad_norm) : 1.0f;
             for (size_t subindex = 0; subindex < count; subindex++){
                 float g = grad_ptr[subindex] * grad_scale * norm_scale;
                 if (use_adam){
