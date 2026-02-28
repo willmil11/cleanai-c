@@ -74,7 +74,7 @@ You can have multiple dataset files to split your data across.
 If your loss is not really decreasing try to increase your learningRate by a little bit, but if it has been decreasing but now is not anymore try to decrease your learningRate by a bit you might need finer, more precise learning. If your loss reaches 0 it means your model has overfitted (learnt the data perfectly) which is generally bad because you generally want your model to think and not just repeat the dataset, the optimal loss is often between 1 and 2. If after a lot of epochs your loss doesn't decrease despite learningRate adjustments your model might just not have enough capacity, parameters to learn the data well enough, try to raise things like embeddingSize, heads, ffnGrowSize, layers, etc... Also for epoch number, I recommend choosing a very high number you'll probably never reach because you can always stop training in the checkpoint clis every epoch.
 
 ## Version history
-- 1.1.7: Fixed numerical instability.
+- 1.1.7: Fixed numerical instability. Aka agc was added (credit to claude for this specific change)
 - 1.1.6: Removed a few comments, I'm not even gonna bump up the last date that I worked on this because this update is so insignificant it barely even deserves to be mentioned here.
 - 1.1.5: Updated README.
 - 1.1.4: Fixed a single printf.
