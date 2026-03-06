@@ -1,4 +1,4 @@
-# Cleanai-c 1.1.7
+# Cleanai-c 1.2.0
 
 ## What's this?
 This is a cli to easily with almost no setup, pre-train, train and use a transformer chatbot, see I'm the guy that made <a href="https://github.com/willmil11/cleanai">cleanai</a> which is basically javascript pytorch made from scratch with no machine learning libraries. Except I originally made that one as a python library then translated it to js for speed then added a cli around it etc. It is very unclean and pretty slow, therefore I decided to make this version in c with better design choices.
@@ -10,7 +10,7 @@ I am willmil11, a 15 year old french self taught dev.
 I thought about how cleanai's codebase is pure hot steaming garbage and decided to remake it but in C.
 
 ## How long have you been working on this?
-I've been working on the <a href="https://github.com/willmil11/cleanai">original cleanai repo</a> for almost 11 months (although realistically I stopped working on it since 6 months ago so more like 5 months). And I've been working on this repo you're on right now for about 4.5 months. (Note that this information is true today, dec. 25 2025 but will change in the future, that is how time works.)
+I've been working on the <a href="https://github.com/willmil11/cleanai">original cleanai repo</a> for almost 13.5 months (although realistically I stopped working on it since 8.5 months ago so more like 5 months). And I've been working on this repo you're on right now for about 7 months. (Note that this information is true today, mar. 6 2026 but will change in the future, that is how time works.)
 
 ## How to install?
 Make sure you have the fish shell, gcc, curl and git installed then just run
@@ -74,6 +74,7 @@ You can have multiple dataset files to split your data across.
 If your loss is not really decreasing try to increase your learningRate by a little bit, but if it has been decreasing but now is not anymore try to decrease your learningRate by a bit you might need finer, more precise learning. If your loss reaches 0 it means your model has overfitted (learnt the data perfectly) which is generally bad because you generally want your model to think and not just repeat the dataset, the optimal loss is often between 1 and 2. If after a lot of epochs your loss doesn't decrease despite learningRate adjustments your model might just not have enough capacity, parameters to learn the data well enough, try to raise things like embeddingSize, heads, ffnGrowSize, layers, etc... Also for epoch number, I recommend choosing a very high number you'll probably never reach because you can always stop training in the checkpoint clis every epoch.
 
 ## Version history
+- 1.2.0: Fixed bugs for training correctness involving RoPE, config parsing and other things. Tho the current approach for RoPE could be made more efficient but that's for next version.
 - 1.1.7: Fixed numerical instability. Aka agc was added (credit to claude for this specific change)
 - 1.1.6: Removed a few comments, I'm not even gonna bump up the last date that I worked on this because this update is so insignificant it barely even deserves to be mentioned here.
 - 1.1.5: Updated README.

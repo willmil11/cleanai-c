@@ -1193,6 +1193,7 @@ int main(int argc, char** argv){
     bool new = false;
     bool load = false;
     bool debug = false;
+    bool currently_pretraining = false;
     int head_dim = -1;
     int embeddingSize = -1;
     int heads = -1;
@@ -1697,7 +1698,7 @@ parse_config:
         }
     }
     else{
-        if ((!(strcmp("adam", pre_train_optimizer_raw->valuestring) == 0)) && (!(strcmp("sgd_momentum", pre_train_optimizer_raw->valuestring))) && (!(strcmp("sgd", pre_train_optimizer_raw->valuestring)))){
+        if ((!(strcmp("adam", pre_train_optimizer_raw->valuestring) == 0)) && (!(strcmp("sgd_momentum", pre_train_optimizer_raw->valuestring) == 0)) && (!(strcmp("sgd", pre_train_optimizer_raw->valuestring) == 0))){
             if (do_pretrain){
                 printf("[Config] [Fatal] pre-train-optimizer is supposed to be either \"adam\", \"sgd_momentum\" or \"sgd\" but it is set to %s.\n", pre_train_optimizer_raw->valuestring);
             }
@@ -1735,7 +1736,7 @@ parse_config:
         }
     }
     else{
-        if ((!(strcmp("adam", train_optimizer_raw->valuestring) == 0)) && (!(strcmp("sgd_momentum", train_optimizer_raw->valuestring))) && (!(strcmp("sgd", train_optimizer_raw->valuestring)))){
+        if ((!(strcmp("adam", train_optimizer_raw->valuestring) == 0)) && (!(strcmp("sgd_momentum", train_optimizer_raw->valuestring) == 0)) && (!(strcmp("sgd", train_optimizer_raw->valuestring) == 0))){
             if (do_train){
                 printf("[Config] [Fatal] train-optimizer is supposed to be either \"adam\", \"sgd_momentum\" or \"sgd\" but it is set to %s.\n", train_optimizer_raw->valuestring);
             }
@@ -2167,7 +2168,7 @@ parse_config:
             }
 
             if (new){
-                biasesinitrange = malloc(2 * sizeof(double));
+                biasesinitrange = malloc(2 * sizeof(float));
                 if (!biasesinitrange){
                     printf("Failed memory allocation to parse config.\n");
                     return 1;
@@ -2229,7 +2230,7 @@ parse_config:
             }
 
             if (new){
-                embeddinginitrange = malloc(2 * sizeof(double));
+                embeddinginitrange = malloc(2 * sizeof(float));
                 if (!embeddinginitrange){
                     printf("Failed memory allocation to parse config.\n");
                     return 1;
@@ -6067,6 +6068,8 @@ after_opt_select:
                 param* value_weights = &layers[layer].weights.attention.heads[head].value;
 
                 float** norm1_output_cache = cache.layers[layer].normalized;
+
+                // --- Pass 1: Accumulate v_grad, q_grad, k_grad across ALL positions ---
                 for (int index = 0; index < seq_len; index++){
                     for (int subindex = 0; subindex < head_dim; subindex++){
                         for (int subindex_ = 0; subindex_ < seq_len; subindex_++){
@@ -6091,6 +6094,48 @@ after_opt_select:
                                 k_grad[subindex][subindex_] += score_grad * cache.layers[layer].heads[head].q_vectors[index][subindex_];
                             }
                         }
+                    }
+                }
+
+                // --- Recompute RoPE tables for inverse rotation ---
+                float** rope_cos_bp = track(malloc(seq_len * sizeof(float*)), "Failed to allocate RoPE cos for backprop.");
+                float** rope_sin_bp = track(malloc(seq_len * sizeof(float*)), "Failed to allocate RoPE sin for backprop.");
+                for (int index = 0; index < seq_len; index++){
+                    rope_cos_bp[index] = track(malloc(head_dim * sizeof(float)), "Failed to allocate RoPE cos for backprop.");
+                    rope_sin_bp[index] = track(malloc(head_dim * sizeof(float)), "Failed to allocate RoPE sin for backprop.");
+                    for (int subindex = 0; subindex + 1 < head_dim; subindex += 2){
+                        float denominator = powf(10000.0f, (float)(subindex) / (float)(head_dim));
+                        float theta = (float)index / denominator;
+                        float c = cosf(theta);
+                        float s = sinf(theta);
+                        rope_cos_bp[index][subindex] = c;
+                        rope_sin_bp[index][subindex] = s;
+                        rope_cos_bp[index][subindex + 1] = c;
+                        rope_sin_bp[index][subindex + 1] = s;
+                    }
+                }
+
+                // --- Pass 2: Inverse RoPE on q/k grads, then compute weight/bias/input grads ---
+                for (int index = 0; index < seq_len; index++){
+                    // Apply inverse RoPE to q_grad and k_grad
+                    // Forward was: q_rot[i] = q[i]*cos - q[i+1]*sin
+                    //              q_rot[i+1] = q[i]*sin + q[i+1]*cos
+                    // Inverse (transpose of rotation): 
+                    //   q_pre[i]   = q_post[i]*cos + q_post[i+1]*sin
+                    //   q_pre[i+1] = -q_post[i]*sin + q_post[i+1]*cos
+                    for (int subindex = 0; subindex + 1 < head_dim; subindex += 2){
+                        float c = rope_cos_bp[index][subindex];
+                        float s = rope_sin_bp[index][subindex];
+
+                        float qg_even = q_grad[index][subindex];
+                        float qg_odd  = q_grad[index][subindex + 1];
+                        q_grad[index][subindex]     = qg_even * c + qg_odd * s;
+                        q_grad[index][subindex + 1] = -qg_even * s + qg_odd * c;
+
+                        float kg_even = k_grad[index][subindex];
+                        float kg_odd  = k_grad[index][subindex + 1];
+                        k_grad[index][subindex]     = kg_even * c + kg_odd * s;
+                        k_grad[index][subindex + 1] = -kg_even * s + kg_odd * c;
                     }
 
                     float* normalized_input_embedding = norm1_output_cache[index];
@@ -6243,11 +6288,11 @@ after_opt_select:
         }
 
         char* optimizer = NULL;
-        if (do_train){
-            optimizer = train_optimizer;
+        if (currently_pretraining){
+            optimizer = pre_train_optimizer;
         }
         else{
-            optimizer = pre_train_optimizer;
+            optimizer = train_optimizer;
         }
 
         bool use_adam = true;
@@ -6966,6 +7011,7 @@ after_opt_select:
     void pretrain(int epochAmount){
         long long pretrain_timer = timer();
         printf("Starting pretraining...\n");
+        currently_pretraining = true;
         
         float* loss_history = NULL;
         size_t loss_history_len = 0;
@@ -7137,6 +7183,7 @@ after_opt_select:
         //Reset plateau counters for train
         lr_plateau_best_loss = __FLT_MAX__;
         lr_plateau_counter = 0;
+        currently_pretraining = false;
         return;
     }
 
