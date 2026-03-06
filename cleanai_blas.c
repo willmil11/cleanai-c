@@ -6224,7 +6224,7 @@ after_opt_select:
             float grad_norm = (float)sqrt(grad_norm_sq);
             float param_norm = (float)sqrt(param_norm_sq);
             if (isnan(grad_norm) || isinf(grad_norm)) return;
-            float agc_lambda = 0.01f;
+            float agc_lambda = 0.1f;
             float agc_max = agc_lambda * fmaxf(param_norm, 1e-3f);
             float norm_scale = (grad_norm > agc_max) ? (agc_max / grad_norm) : 1.0f;
             for (size_t subindex = 0; subindex < count; subindex++){
