@@ -1395,6 +1395,11 @@ int main(int argc, char** argv){
         }
     }
 
+    if (!new || !load){
+        help("You need to specify either --new or --load.");
+        return 0;
+    }
+
     if (new){
         if ((!do_pretrain) && (!do_train)){
             help("You need to specify either or both --pretrain and --train with --new.");

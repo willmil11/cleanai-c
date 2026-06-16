@@ -43,30 +43,22 @@ function compile
     echo "Compiling $argv[1]."
     set -l arch (uname -m)
     set -l os (uname -s)
-    # Base flags for all platforms
     set -l flags -Ofast -fno-finite-math-only -funroll-loops -fomit-frame-pointer -flto=auto -fwhole-program -fno-stack-protector -fgraphite-identity -floop-nest-optimize
     switch $arch
         case x86_64 i686
-            # x86/x64 specific
             set -a flags -march=native
             if test "$os" = Linux
-                # Linux x86 can use these safely
                 set -a flags -fno-plt -fno-semantic-interposition
             end
         case aarch64 arm64
-            # ARM64 (Apple Silicon, ARM servers, your phone)
             set -a flags -mcpu=native
             if test "$os" = Darwin
-                # macOS ARM specific - add any macOS-specific flags here if needed
             else
-                # Linux ARM (like your phone)
                 set -a flags -moutline-atomics
             end
         case armv7l armv8l
-            # 32-bit ARM
             set -a flags -mcpu=native -mfpu=neon-vfpv4 -mfloat-abi=hard
         case '*'
-            # Fallback for unknown architectures
             set -a flags -march=native
     end
     if test "$argv[1]" = cleanai-original
