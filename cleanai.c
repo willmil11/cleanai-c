@@ -1355,7 +1355,7 @@ int main(int argc, char** argv){
         }
     }
 
-    if (!new || !load){
+    if (!new && !load){
         help("You need to specify either --new or --load.");
         return 0;
     }
