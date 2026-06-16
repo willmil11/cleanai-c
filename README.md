@@ -4,7 +4,7 @@
 This is a cli to easily with almost no setup, pre-train, train and use a transformer chatbot, see I'm the guy that made <a href="https://github.com/willmil11/cleanai">cleanai</a> which is basically javascript pytorch made from scratch with no machine learning libraries. Except I originally made that one as a python library then translated it to js for speed then added a cli around it etc. It is very unclean and pretty slow, therefore I decided to make this version in c with better design choices.
 
 ## Who are you?
-I am willmil11, a 15 year old french self taught dev.
+I am willmil11, a 15 year old self taught french dev.
 
 ## Why are you doing this?
 I thought about how cleanai's codebase is pure hot steaming garbage and decided to remake it but in C.
