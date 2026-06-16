@@ -48,7 +48,6 @@ int lr_plateau_counter = 0;
 inline void blas_matmul_bias(float* A, float* B, float* bias, float* C, int M, int N, int K) {
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, M, N, K, 1.0f, A, K, B, K, 0.0f, C, N);
 
-    // Add bias if provided
     if (bias != NULL) {
         for (int i = 0; i < M; i++) {
             for (int j = 0; j < N; j++) {
@@ -343,7 +342,6 @@ int main(int argc, char** argv){
         lock_id();
         int id;
         while (true){
-            // Thread-safe random
             static __thread unsigned int tls_seed = 0;
             static __thread bool tls_seed_init = false;
             if (!tls_seed_init) {
@@ -559,11 +557,10 @@ int main(int argc, char** argv){
         struct fetch_data *data = (struct fetch_data *) c->fn_data;
         
         if (ev == MG_EV_CONNECT) {
-            // Init TLS for HTTPS
-            struct mg_tls_opts opts = {.ca = NULL};  // NULL = no cert verification
+            struct mg_tls_opts opts = {.ca = NULL};
             mg_tls_init(c, &opts);
-        } else if (ev == MG_EV_TLS_HS) {
-            // TLS handshake complete, now send request
+        }
+        else if (ev == MG_EV_TLS_HS) {
             struct mg_str host = mg_url_host(data->url);
             mg_printf(c,
                 "GET %s HTTP/1.1\r\n"
@@ -572,7 +569,8 @@ int main(int argc, char** argv){
                 "\r\n",
                 mg_url_uri(data->url),
                 (int) host.len, host.buf);
-        } else if (ev == MG_EV_HTTP_MSG) {
+        }
+        else if (ev == MG_EV_HTTP_MSG) {
             struct mg_http_message *hm = (struct mg_http_message *) ev_data;
             
             if (mg_http_status(hm) != 200) {
@@ -588,7 +586,8 @@ int main(int argc, char** argv){
             }
             data->done = 1;
             c->is_closing = 1;
-        } else if (ev == MG_EV_ERROR) {
+        }
+        else if (ev == MG_EV_ERROR) {
             data->done = 1;
         }
     }
@@ -2438,7 +2437,7 @@ after_config_parse:
     free(vocab_per_toksize);
     printf("Computed token to id data in %lldms.\n", timer_end(timer_));
 
-    int token_to_id(char* tok) { //binary search bruh
+    int token_to_id(char* tok) { //binary search
         int left = 0;
         int right = vocab_len - 1;
 
@@ -2729,10 +2728,7 @@ after_config_parse:
         for (int index = 0; index < layersAmount; index++){
             printf("Initalizing layer %d/%d...\n", index + 1, layersAmount);
             long long timer__ = timer();
-            if (!alloc_param(&layers[index].weights.normalize_1, embeddingSize) ||
-                !alloc_param(&layers[index].weights.normalize_2, embeddingSize) ||
-                !alloc_param(&layers[index].biases.normalize_1, embeddingSize) ||
-                !alloc_param(&layers[index].biases.normalize_2, embeddingSize)){
+            if (!alloc_param(&layers[index].weights.normalize_1, embeddingSize) || !alloc_param(&layers[index].weights.normalize_2, embeddingSize) || !alloc_param(&layers[index].biases.normalize_1, embeddingSize) || !alloc_param(&layers[index].biases.normalize_2, embeddingSize)){
                 printf("Failed to allocate memory to initalize layers.\n");
                 return 1;
             }
@@ -2742,35 +2738,24 @@ after_config_parse:
                 printf("Failed to allocate memory to initalize layers.\n");
                 return 1;
             }
-            if (!alloc_param(&layers[index].weights.attention.output, embeddingSize * (head_dim * heads)) ||
-                !alloc_param(&layers[index].biases.attention.output, embeddingSize)){
+            if (!alloc_param(&layers[index].weights.attention.output, embeddingSize * (head_dim * heads)) || !alloc_param(&layers[index].biases.attention.output, embeddingSize)){
                 printf("Failed to allocate memory to initalize layers.\n");
                 return 1;
             }
-            if (!alloc_param(&layers[index].weights.feed_forward.grow, embeddingSize * (embeddingSize * ffnGrowSize)) ||
-                !alloc_param(&layers[index].weights.feed_forward.gate, embeddingSize * (embeddingSize * ffnGrowSize)) ||
-                !alloc_param(&layers[index].weights.feed_forward.shrink, embeddingSize * (embeddingSize * ffnGrowSize)) ||
-                !alloc_param(&layers[index].biases.feed_forward.grow, (embeddingSize * ffnGrowSize)) ||
-                !alloc_param(&layers[index].biases.feed_forward.gate, (embeddingSize * ffnGrowSize)) ||
-                !alloc_param(&layers[index].biases.feed_forward.shrink, embeddingSize)){
+            if (!alloc_param(&layers[index].weights.feed_forward.grow, embeddingSize * (embeddingSize * ffnGrowSize)) || !alloc_param(&layers[index].weights.feed_forward.gate, embeddingSize * (embeddingSize * ffnGrowSize)) || !alloc_param(&layers[index].weights.feed_forward.shrink, embeddingSize * (embeddingSize * ffnGrowSize)) || !alloc_param(&layers[index].biases.feed_forward.grow, (embeddingSize * ffnGrowSize)) || !alloc_param(&layers[index].biases.feed_forward.gate, (embeddingSize * ffnGrowSize)) || !alloc_param(&layers[index].biases.feed_forward.shrink, embeddingSize)){
                 printf("Failed to allocate memory to initalize layers.\n");
                 return 1;
             }
 
             for (int subindex = 0; subindex < embeddingSize; subindex++){
-                layers[index].weights.normalize_1.param[subindex] = 1.0f; // RMSNorm gamma
-                layers[index].weights.normalize_2.param[subindex] = 1.0f; // RMSNorm gamma
-                layers[index].biases.normalize_1.param[subindex] = 0.0f;  // beta
-                layers[index].biases.normalize_2.param[subindex] = 0.0f;  // beta
+                layers[index].weights.normalize_1.param[subindex] = 1.0f;
+                layers[index].weights.normalize_2.param[subindex] = 1.0f;
+                layers[index].biases.normalize_1.param[subindex] = 0.0f;
+                layers[index].biases.normalize_2.param[subindex] = 0.0f;
             }
 
             for (int subindex = 0; subindex < heads; subindex++){
-                if (!alloc_param(&layers[index].weights.attention.heads[subindex].query, head_dim * embeddingSize) ||
-                    !alloc_param(&layers[index].weights.attention.heads[subindex].key, head_dim * embeddingSize) ||
-                    !alloc_param(&layers[index].weights.attention.heads[subindex].value, head_dim * embeddingSize) ||
-                    !alloc_param(&layers[index].biases.attention.heads[subindex].query, head_dim) ||
-                    !alloc_param(&layers[index].biases.attention.heads[subindex].key, head_dim) ||
-                    !alloc_param(&layers[index].biases.attention.heads[subindex].value, head_dim)){
+                if (!alloc_param(&layers[index].weights.attention.heads[subindex].query, head_dim * embeddingSize) || !alloc_param(&layers[index].weights.attention.heads[subindex].key, head_dim * embeddingSize) || !alloc_param(&layers[index].weights.attention.heads[subindex].value, head_dim * embeddingSize) || !alloc_param(&layers[index].biases.attention.heads[subindex].query, head_dim) || !alloc_param(&layers[index].biases.attention.heads[subindex].key, head_dim) || !alloc_param(&layers[index].biases.attention.heads[subindex].value, head_dim)){
                     printf("Failed to allocate memory to initalize layers.\n");
                     return 1;
                 }
@@ -2848,8 +2833,7 @@ after_config_parse:
         printf("Initalizing vocabulary projection weights and biases.\n");
         timer_ = timer();
         
-        if (!alloc_param(&vocab_projection.weights, vocab_len * embeddingSize) ||
-            !alloc_param(&vocab_projection.biases, vocab_len)){
+        if (!alloc_param(&vocab_projection.weights, vocab_len * embeddingSize) || !alloc_param(&vocab_projection.biases, vocab_len)){
             printf("Failed memory allocation to initalize vocabulary projection.\n");
             return 1;
         }
@@ -3604,8 +3588,7 @@ after_config_parse:
                 return 1;
             }
 
-            if (!alloc_param(&vocab_projection.weights, vocab_len * embeddingSize) ||
-                !alloc_param(&vocab_projection.biases, vocab_len)){
+            if (!alloc_param(&vocab_projection.weights, vocab_len * embeddingSize) || !alloc_param(&vocab_projection.biases, vocab_len)){
                 printf("Failed memory allocation to load model.\n");
                 return 1;
             }
@@ -4374,7 +4357,7 @@ after_opt_select:
         }
         float* x_hat = _calculate_x_hat_only(vec, vec_len);
         if (!x_hat){
-            printf("Failed to calculate x_hat.\n"); //In case physics have broken down or a bitflip or idk
+            printf("Failed to calculate x_hat.\n"); //In case physics have broken down or a bitflip or idk cuz this is impossible
             exit(1);
         }
         for (int index = 0; index < vec_len; index++){
@@ -4483,27 +4466,27 @@ after_opt_select:
     }
 
     typedef struct {
-        float* norm1_x_hat;          // [seq_len * embeddingSize]
-        float* norm1_inv_rms;        // [seq_len]
+        float* norm1_x_hat;
+        float* norm1_inv_rms;
         struct {
-            float* q_vectors;        // [seq_len * head_dim]
-            float* k_vectors;        // [seq_len * head_dim]
-            float* v_vectors;        // [seq_len * head_dim]
-            float* attention_scores; // [seq_len * seq_len]
-            float* attention_probs;  // [seq_len * seq_len]
-            float* output;           // [seq_len * head_dim]
+            float* q_vectors;
+            float* k_vectors;
+            float* v_vectors;
+            float* attention_scores;
+            float* attention_probs;
+            float* output;
         }* heads;
-        float* combined;             // [seq_len * embeddingSize]
-        float* attn_dropout_mask;    // [seq_len * embeddingSize]
-        float* norm2_x_hat;          // [seq_len * embeddingSize]
-        float* norm2_inv_rms;        // [seq_len]
-        float* norm2_output;         // [seq_len * embeddingSize]
-        float* normalized;           // [seq_len * embeddingSize]
+        float* combined;
+        float* attn_dropout_mask;
+        float* norm2_x_hat;
+        float* norm2_inv_rms;
+        float* norm2_output;
+        float* normalized;
         struct {
-            float* bigger;           // [seq_len * (embeddingSize * ffnGrowSize)]
-            float* after_relu;       // [seq_len * (embeddingSize * ffnGrowSize)]
-            float* final;            // [seq_len * embeddingSize]
-            float* ff_dropout_mask;  // [seq_len * (embeddingSize * ffnGrowSize)]
+            float* bigger;
+            float* after_relu;
+            float* final;
+            float* ff_dropout_mask;
         } feed_forward;
     } layer_cache_entry;
 
@@ -4512,10 +4495,10 @@ after_opt_select:
         struct {
             int* tokenized;
             size_t seq_len;
-            float* initial_embeddings;     // [seq_len * embeddingSize]
-            float* positional_encodings;   // [seq_len * embeddingSize]
-            float* vocab_scores;           // [seq_len * vocab_len]
-            float* final_embeddings;       // [seq_len * embeddingSize]
+            float* initial_embeddings;
+            float* positional_encodings;
+            float* vocab_scores;
+            float* final_embeddings;
             layer_cache_entry* layers;
         } cache;
         bool success;
@@ -4598,7 +4581,7 @@ after_opt_select:
         int cmp_ptr(const void* a, const void* b){
             void* pa = *(void**)a;
             void* pb = *(void**)b;
-            return (pa > pb) - (pa < pb); // or: return (uintptr_t)pa - (uintptr_t)pb;
+            return (pa > pb) - (pa < pb);
         }
 
         void sort_tracked(){
@@ -4904,21 +4887,10 @@ after_opt_select:
                 param* head_key_biases = &head_biases.key;
                 param* head_value_biases = &head_biases.value;
 
-                // BLAS-optimized Q/K/V projections (normalized_embeddings is already flat)
-                // Compute Q, K, V using BLAS: C = A @ B^T + bias
-                // A: [seq_len, embeddingSize], B: [head_dim, embeddingSize]
+                blas_matmul_bias(normalized_embeddings, head_query_weights->param, head_query_biases->param, q_vectors, seq_len, head_dim, embeddingSize);
+                blas_matmul_bias(normalized_embeddings, head_key_weights->param, head_key_biases->param, k_vectors, seq_len, head_dim, embeddingSize);
+                blas_matmul_bias(normalized_embeddings, head_value_weights->param, head_value_biases->param, v_vectors, seq_len, head_dim, embeddingSize);
 
-                // Q = normalized_embeddings @ W_q^T + bias_q
-                blas_matmul_bias(normalized_embeddings, head_query_weights->param, head_query_biases->param,
-                                 q_vectors, seq_len, head_dim, embeddingSize);
-                // K = normalized_embeddings @ W_k^T + bias_k
-                blas_matmul_bias(normalized_embeddings, head_key_weights->param, head_key_biases->param,
-                                 k_vectors, seq_len, head_dim, embeddingSize);
-                // V = normalized_embeddings @ W_v^T + bias_v
-                blas_matmul_bias(normalized_embeddings, head_value_weights->param, head_value_biases->param,
-                                 v_vectors, seq_len, head_dim, embeddingSize);
-
-                // Apply RoPE to Q and K
                 for (int index = 0; index < seq_len; index++){
                     for (int subindex = 0; subindex + 1 < head_dim; subindex += 2){
                         float c = rope_cos[index][subindex];
@@ -4934,11 +4906,9 @@ after_opt_select:
                     }
                 }
 
-                // BLAS-optimized attention scores: scores = Q @ K^T / sqrt(head_dim)
                 float scale = 1.0f / sqrtf((float)head_dim);
                 blas_attention_scores(q_vectors, k_vectors, attention_scores, seq_len, head_dim, scale);
 
-                // Apply causal mask
                 for (int index = 0; index < seq_len; index++){
                     for (int subindex = 0; subindex < seq_len; subindex++){
                         if (subindex > index){
@@ -4947,14 +4917,12 @@ after_opt_select:
                     }
                 }
 
-                // Softmax (per-row) - need to use row pointers for softmax
                 for (int index = 0; index < seq_len; index++){
                     float* row_scores = &attention_scores[index * seq_len];
                     float* row_probs = &attention_probs[index * seq_len];
                     softmax(row_scores, seq_len, row_probs);
                 }
 
-                // BLAS-optimized attention output: output = probs @ V
                 blas_attention_output(attention_probs, v_vectors, post_attention_vectors, seq_len, head_dim);
 
                 head_outputs[head] = post_attention_vectors;
@@ -4980,8 +4948,6 @@ after_opt_select:
                 combined_vectors = track(calloc(seq_len * embeddingSize, sizeof(float)), "Failed to allocate memory to store combined vectors.");
             }
 
-            // BLAS-optimized attention output projection
-            // Concatenate all head outputs into flat array [seq_len, head_dim * heads]
             float* flat_concatenated = malloc(seq_len * head_dim * heads * sizeof(float));
             if (!flat_concatenated){
                 failed_alloc("Failed to allocate memory for flat concatenated heads.");
@@ -4990,8 +4956,7 @@ after_opt_select:
             for (int index = 0; index < seq_len; index++){
                 int current_offset = 0;
                 for (int subindex = 0; subindex < heads; subindex++){
-                    memcpy(flat_concatenated + index * head_dim * heads + current_offset,
-                           &head_outputs[subindex][index * head_dim], head_dim * sizeof(float));
+                    memcpy(flat_concatenated + index * head_dim * heads + current_offset, &head_outputs[subindex][index * head_dim], head_dim * sizeof(float));
                     current_offset += head_dim;
                 }
             }
@@ -4999,22 +4964,17 @@ after_opt_select:
             param* output_weights = &layers[layer].weights.attention.output;
             param* output_biases = &layers[layer].biases.attention.output;
 
-            // output = concatenated @ W_out^T + bias
-            // concatenated: [seq_len, head_dim * heads]
-            // W_out: [embeddingSize, head_dim * heads]
-            // output: [seq_len, embeddingSize]
-            blas_matmul_bias(flat_concatenated, output_weights->param, output_biases->param,
-                             combined_vectors, seq_len, embeddingSize, head_dim * heads);
+            blas_matmul_bias(flat_concatenated, output_weights->param, output_biases->param, combined_vectors, seq_len, embeddingSize, head_dim * heads);
 
             free(flat_concatenated);
             if (return_cache){
                 free(head_outputs);
             }
 
-        if (return_cache && antiOverfittingOptimisations){ //cache = training
-            float dropout_rate = 0.1f;
-            rets.cache.layers[layer].attn_dropout_mask = malloc(seq_len * embeddingSize * sizeof(float));
-            if (!rets.cache.layers[layer].attn_dropout_mask){
+            if (return_cache && antiOverfittingOptimisations){ //cache = training
+                float dropout_rate = 0.1f;
+                rets.cache.layers[layer].attn_dropout_mask = malloc(seq_len * embeddingSize * sizeof(float));
+                if (!rets.cache.layers[layer].attn_dropout_mask){
                     failed_alloc("Failed to allocate memory to store attention dropout mask.");
                 }
                 for (int index = 0; index < seq_len; index++){
@@ -5112,14 +5072,8 @@ after_opt_select:
             param* gate_weights = &layers[layer].weights.feed_forward.gate;
             param* gate_biases = &layers[layer].biases.feed_forward.gate;
 
-            // BLAS-optimized FFN grow and gate computation (normalized_vectors is already flat)
-            // bigger = normalized @ grow_weights + grow_biases
-            blas_matmul_notrans_bias(normalized_vectors, grow_weights->param, grow_biases->param,
-                                     bigger_vectors, seq_len, embeddingSize * ffnGrowSize, embeddingSize);
-
-            // gate = normalized @ gate_weights + gate_biases
-            blas_matmul_notrans_bias(normalized_vectors, gate_weights->param, gate_biases->param,
-                                     gate_vectors, seq_len, embeddingSize * ffnGrowSize, embeddingSize);
+            blas_matmul_notrans_bias(normalized_vectors, grow_weights->param, grow_biases->param, bigger_vectors, seq_len, embeddingSize * ffnGrowSize, embeddingSize);
+            blas_matmul_notrans_bias(normalized_vectors, gate_weights->param, gate_biases->param, gate_vectors, seq_len, embeddingSize * ffnGrowSize, embeddingSize);
 
             if (return_cache){
                 rets.cache.layers[layer].feed_forward.bigger = bigger_vectors;
@@ -5189,9 +5143,7 @@ after_opt_select:
             param* shrink_weights = &layers[layer].weights.feed_forward.shrink;
             param* shrink_biases = &layers[layer].biases.feed_forward.shrink;
 
-            // BLAS-optimized FFN shrink (final_big_vectors is already flat)
-            blas_matmul_bias(final_big_vectors, shrink_weights->param, shrink_biases->param,
-                             final_vectors, seq_len, embeddingSize, embeddingSize * ffnGrowSize);
+            blas_matmul_bias(final_big_vectors, shrink_weights->param, shrink_biases->param, final_vectors, seq_len, embeddingSize, embeddingSize * ffnGrowSize);
 
             for (int index = 0; index < seq_len; index++){
                 for (int subindex = 0; subindex < embeddingSize; subindex++){
@@ -5245,16 +5197,11 @@ after_opt_select:
         int start_pos = return_cache ? 0 : seq_len - 1;
         int num_positions = seq_len - start_pos;
 
-        // BLAS-optimized vocab projection (final_embeddings is already flat)
-        // For non-cache mode, we only need to compute for the last position
         if (return_cache){
-            blas_matmul_bias(final_embeddings, vocab_weights->param, vocab_biases->param,
-                             scores, seq_len, vocab_len, embeddingSize);
+            blas_matmul_bias(final_embeddings, vocab_weights->param, vocab_biases->param, scores, seq_len, vocab_len, embeddingSize);
         }
         else{
-            // Just compute for the last position
-            blas_matmul_bias(&final_embeddings[start_pos * embeddingSize], vocab_weights->param, vocab_biases->param,
-                             &scores[start_pos * vocab_len], num_positions, vocab_len, embeddingSize);
+            blas_matmul_bias(&final_embeddings[start_pos * embeddingSize], vocab_weights->param, vocab_biases->param, &scores[start_pos * vocab_len], num_positions, vocab_len, embeddingSize);
         }
 
         if (return_cache){
@@ -5318,7 +5265,7 @@ after_opt_select:
     } train_step_token;
 
     typedef struct {
-        float* embedding_grads;  // [seq_len * embeddingSize]
+        float* embedding_grads;
         int* tokenized;
         layer* layer_grads;
         struct {
@@ -5423,7 +5370,7 @@ after_opt_select:
         int cmp_ptr(const void* a, const void* b){
             void* pa = *(void**)a;
             void* pb = *(void**)b;
-            return (pa > pb) - (pa < pb); // or: return (uintptr_t)pa - (uintptr_t)pb;
+            return (pa > pb) - (pa < pb);
         }
 
         void sort_tracked(){
@@ -5452,7 +5399,7 @@ after_opt_select:
         //Failed alloc procedure.
         void failed_alloc(char* failed_task){
             printf("%s.\n", failed_task);
-            exit(1); //let os reclaim memory lol
+            exit(1); //let os reclaim memory here again
         }
 
         void* track(void* ptr, char* failed_task){
@@ -5622,8 +5569,7 @@ after_opt_select:
 
         param vocab_projection_weight_gradients = {0};
         param vocab_projection_bias_gradients = {0};
-        if (!alloc_param(&vocab_projection_weight_gradients, vocab_len * embeddingSize) ||
-            !alloc_param(&vocab_projection_bias_gradients, vocab_len)){
+        if (!alloc_param(&vocab_projection_weight_gradients, vocab_len * embeddingSize) || !alloc_param(&vocab_projection_bias_gradients, vocab_len)){
             printf("Failed to allocate memory to compute vocabulary projection gradients.\n");
             rets.success = false;
             return rets;
@@ -5635,7 +5581,7 @@ after_opt_select:
         }
 
         param* vocab_projection_weights = &vocab_projection.weights;
-        float* final_layer_activation = cache.layers[layersAmount - 1].feed_forward.final; //[seq_len * embeddingSize]
+        float* final_layer_activation = cache.layers[layersAmount - 1].feed_forward.final;
 
         for (int pos = 0; pos < seq_len; pos++){
             float* activation = &final_layer_activation[pos * embeddingSize];
@@ -5662,33 +5608,18 @@ after_opt_select:
         float** next_grad = error_gradients;
         
         for (int layer = layersAmount - 1; layer >= 0; layer--){
-            if (!alloc_param(&rets.layer_grads[layer].weights.normalize_1, embeddingSize) ||
-                !alloc_param(&rets.layer_grads[layer].weights.normalize_2, embeddingSize) ||
-                !alloc_param(&rets.layer_grads[layer].biases.normalize_1, embeddingSize) ||
-                !alloc_param(&rets.layer_grads[layer].biases.normalize_2, embeddingSize)){
+            if (!alloc_param(&rets.layer_grads[layer].weights.normalize_1, embeddingSize) || !alloc_param(&rets.layer_grads[layer].weights.normalize_2, embeddingSize) || !alloc_param(&rets.layer_grads[layer].biases.normalize_1, embeddingSize) || !alloc_param(&rets.layer_grads[layer].biases.normalize_2, embeddingSize)){
                 failed_alloc("Failed to allocate memory to compute layer gradients.");
             }
             rets.layer_grads[layer].weights.attention.heads = notrack(malloc(heads * sizeof(*rets.layer_grads[layer].weights.attention.heads)), "Failed to allocate memory to compute layer gradients.");
             rets.layer_grads[layer].biases.attention.heads = notrack(malloc(heads * sizeof(*rets.layer_grads[layer].biases.attention.heads)), "Failed to allocate memory to compute layer gradients.");
 
-            if (!alloc_param(&rets.layer_grads[layer].weights.attention.output, embeddingSize * (head_dim * heads)) ||
-                !alloc_param(&rets.layer_grads[layer].biases.attention.output, embeddingSize) ||
-                !alloc_param(&rets.layer_grads[layer].weights.feed_forward.grow, embeddingSize * (embeddingSize * ffnGrowSize)) ||
-                !alloc_param(&rets.layer_grads[layer].weights.feed_forward.gate, embeddingSize * (embeddingSize * ffnGrowSize)) ||
-                !alloc_param(&rets.layer_grads[layer].weights.feed_forward.shrink, embeddingSize * (embeddingSize * ffnGrowSize)) ||
-                !alloc_param(&rets.layer_grads[layer].biases.feed_forward.grow, embeddingSize * ffnGrowSize) ||
-                !alloc_param(&rets.layer_grads[layer].biases.feed_forward.gate, embeddingSize * ffnGrowSize) ||
-                !alloc_param(&rets.layer_grads[layer].biases.feed_forward.shrink, embeddingSize)){
+            if (!alloc_param(&rets.layer_grads[layer].weights.attention.output, embeddingSize * (head_dim * heads)) || !alloc_param(&rets.layer_grads[layer].biases.attention.output, embeddingSize) || !alloc_param(&rets.layer_grads[layer].weights.feed_forward.grow, embeddingSize * (embeddingSize * ffnGrowSize)) || !alloc_param(&rets.layer_grads[layer].weights.feed_forward.gate, embeddingSize * (embeddingSize * ffnGrowSize)) || !alloc_param(&rets.layer_grads[layer].weights.feed_forward.shrink, embeddingSize * (embeddingSize * ffnGrowSize)) || !alloc_param(&rets.layer_grads[layer].biases.feed_forward.grow, embeddingSize * ffnGrowSize) || !alloc_param(&rets.layer_grads[layer].biases.feed_forward.gate, embeddingSize * ffnGrowSize) || !alloc_param(&rets.layer_grads[layer].biases.feed_forward.shrink, embeddingSize)){
                 failed_alloc("Failed to allocate memory to compute layer gradients.");
             }
 
             for (int head = 0; head < heads; head++){
-                if (!alloc_param(&rets.layer_grads[layer].weights.attention.heads[head].query, head_dim * embeddingSize) ||
-                    !alloc_param(&rets.layer_grads[layer].weights.attention.heads[head].key, head_dim * embeddingSize) ||
-                    !alloc_param(&rets.layer_grads[layer].weights.attention.heads[head].value, head_dim * embeddingSize) ||
-                    !alloc_param(&rets.layer_grads[layer].biases.attention.heads[head].query, head_dim) ||
-                    !alloc_param(&rets.layer_grads[layer].biases.attention.heads[head].key, head_dim) ||
-                    !alloc_param(&rets.layer_grads[layer].biases.attention.heads[head].value, head_dim)){
+                if (!alloc_param(&rets.layer_grads[layer].weights.attention.heads[head].query, head_dim * embeddingSize) || !alloc_param(&rets.layer_grads[layer].weights.attention.heads[head].key, head_dim * embeddingSize) || !alloc_param(&rets.layer_grads[layer].weights.attention.heads[head].value, head_dim * embeddingSize) || !alloc_param(&rets.layer_grads[layer].biases.attention.heads[head].query, head_dim) || !alloc_param(&rets.layer_grads[layer].biases.attention.heads[head].key, head_dim) || !alloc_param(&rets.layer_grads[layer].biases.attention.heads[head].value, head_dim)){
                     failed_alloc("Failed to allocate memory to compute layer gradients.");
                 }
             }
@@ -5711,15 +5642,8 @@ after_opt_select:
                 fused_grad[index] = fused_grad_flat + index * embeddingSize * ffnGrowSize;
             }
 
-            // BLAS-optimized FFN shrink backward: fused_grad = grad @ W (no transpose)
-            // grad_into_ffn_shrink: [seq_len, embeddingSize]
-            // W: [embeddingSize, embeddingSize * ffnGrowSize]
-            // fused_grad: [seq_len, embeddingSize * ffnGrowSize]
-            // fused_grad = grad @ W_shrink (treating W_shrink as [embeddingSize, ffnGrowSize * embeddingSize])
-            blas_matmul_notrans_bias(grad_into_ffn_shrink_flat, ffw_shrink_weights->param, NULL,
-                                     fused_grad_flat, seq_len, embeddingSize * ffnGrowSize, embeddingSize);
+            blas_matmul_notrans_bias(grad_into_ffn_shrink_flat, ffw_shrink_weights->param, NULL, fused_grad_flat, seq_len, embeddingSize * ffnGrowSize, embeddingSize);
 
-            // Compute weight gradients: dW = grad^T @ fused_output
             for (int index = 0; index < seq_len; index++){
                 int cache_offset = index * embeddingSize * ffnGrowSize;
                 for (int subindex = 0; subindex < embeddingSize * ffnGrowSize; subindex++){
@@ -5785,7 +5709,6 @@ after_opt_select:
                 }
             }
 
-            //Combine gradients from grow and gate paths into norm2 input
             float** combined_norm2_back = track(malloc(seq_len * sizeof(float*)), "Failed to allocate memory for combined norm2 backprop.");
             for (int index = 0; index < seq_len; index++){
                 combined_norm2_back[index] = track(calloc(embeddingSize * sizeof(float), 1), "Failed to allocate memory for combined norm2 backprop.");
@@ -5860,14 +5783,8 @@ after_opt_select:
                 attention_output_input_grad[index] = attention_output_input_grad_flat + index * head_dim * heads;
             }
 
-            // BLAS-optimized attention output backward
-            // input_grad = output_grad @ W_out (no transpose)
-            // output_grad: [seq_len, embeddingSize], W_out: [embeddingSize, head_dim * heads]
-            // input_grad: [seq_len, head_dim * heads]
-            blas_matmul_notrans_bias(scaled_combined_grad_flat, attention_output_weights->param, NULL,
-                                     attention_output_input_grad_flat, seq_len, head_dim * heads, embeddingSize);
+            blas_matmul_notrans_bias(scaled_combined_grad_flat, attention_output_weights->param, NULL, attention_output_input_grad_flat, seq_len, head_dim * heads, embeddingSize);
 
-            // Compute weight gradients: dW = output_grad^T @ concatenated_input
             float* concatenated_input = track(malloc(head_dim * heads * sizeof(float)), "Failed to allocate memory to compute concatenated input.");
             for (int index = 0; index < seq_len; index++){
                 memset(concatenated_input, 0, head_dim * heads * sizeof(float));
@@ -5929,7 +5846,6 @@ after_opt_select:
                 float* v_vectors_cache = cache.layers[layer].heads[head].v_vectors;
                 float* q_vectors_cache = cache.layers[layer].heads[head].q_vectors;
                 float* k_vectors_cache = cache.layers[layer].heads[head].k_vectors;
-                // --- Pass 1: Accumulate v_grad, q_grad, k_grad across ALL positions ---
                 for (int index = 0; index < seq_len; index++){
                     for (int subindex = 0; subindex < head_dim; subindex++){
                         for (int subindex_ = 0; subindex_ < seq_len; subindex_++){
@@ -5957,7 +5873,6 @@ after_opt_select:
                     }
                 }
 
-                // --- Recompute RoPE tables for inverse rotation ---
                 float** rope_cos_bp = track(malloc(seq_len * sizeof(float*)), "Failed to allocate RoPE cos for backprop.");
                 float** rope_sin_bp = track(malloc(seq_len * sizeof(float*)), "Failed to allocate RoPE sin for backprop.");
                 for (int index = 0; index < seq_len; index++){
@@ -5975,9 +5890,7 @@ after_opt_select:
                     }
                 }
 
-                // --- Pass 2: Inverse RoPE on q/k grads, then compute weight/bias/input grads ---
                 for (int index = 0; index < seq_len; index++){
-                    // Apply inverse RoPE (transpose of forward rotation)
                     for (int subindex = 0; subindex + 1 < head_dim; subindex += 2){
                         float c = rope_cos_bp[index][subindex];
                         float s = rope_sin_bp[index][subindex];
@@ -6398,7 +6311,10 @@ after_opt_select:
                     continue;
                 }
                 if (!worker_gradients[index]->success){
-                    continue;
+                    printf("Batch failed.\n");
+                    printf("This can occur for multiple reasons, but most often it is because your model's context size is too small for your training dataset.\n");
+                    printf("To check if that is the case, read the last few log lines above.\n");
+                    exit(1);
                 }
                 loss_sum += worker_gradients[index]->initial_loss;
                 loss_n++;

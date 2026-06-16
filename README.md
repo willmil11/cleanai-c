@@ -1,4 +1,4 @@
-# Cleanai-c 1.2.3
+# Cleanai-c 1.2.4
 
 ## What's this?
 This is a cli to easily with almost no setup, pre-train, train and use a transformer chatbot, see I'm the guy that made <a href="https://github.com/willmil11/cleanai">cleanai</a> which is basically javascript pytorch made from scratch with no machine learning libraries. Except I originally made that one as a python library then translated it to js for speed then added a cli around it etc. It is very unclean and pretty slow, therefore I decided to make this version in c with better design choices.
@@ -74,6 +74,7 @@ You can have multiple dataset files to split your data across.
 If your loss is not really decreasing try to increase your learningRate by a little bit, but if it has been decreasing but now is not anymore try to decrease your learningRate by a bit you might need finer, more precise learning. If your loss reaches 0 it means your model has overfitted (learnt the data perfectly) which is generally bad because you generally want your model to think and not just repeat the dataset, the optimal loss is often between 1 and 2. If after a lot of epochs your loss doesn't decrease despite learningRate adjustments your model might just not have enough capacity, parameters to learn the data well enough, try to raise things like embeddingSize, heads, ffnGrowSize, layers, etc... Also for epoch number, I recommend choosing a very high number you'll probably never reach because you can always stop training in the checkpoint clis every epoch.
 
 ## Version history
+- 1.2.4: Fixed bug where if training dataset entry would exceed context size everything would get corrupted. Now exits on that failure without destroying everything.
 - 1.2.3: Fixed critical bug introduced in last version.
 - 1.2.2: Fixed bug in cli parser where it would let the user continue (and then crash) if they did not specify --new nor --load. Also cleaned up install.fish slightly.
 - 1.2.1: Made the agc more loose for faster training.
