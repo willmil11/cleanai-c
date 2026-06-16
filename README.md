@@ -10,10 +10,10 @@ I am willmil11, a 15 year old self taught french dev.
 I thought about how cleanai's codebase is pure hot steaming garbage and decided to remake it but in C.
 
 ## How long have you been working on this?
-I've been working on the <a href="https://github.com/willmil11/cleanai">original cleanai repo</a> for almost 13.5 months (although realistically I stopped working on it since 8.5 months ago so more like 5 months). And I've been working on this repo you're on right now for about 7 months. (Note that this information is true today, mar. 6 2026 but will change in the future, that is how time works.)
+I've worked on the <a href="https://github.com/willmil11/cleanai">original cleanai repo</a> for 5 months. And I've been working on this repo you're on right now for about 10.3 months. (Note that this information is true today, jun. 16 2026 but will change in the future, that is how time works)
 
 ## How to install?
-Make sure you have the fish shell, gcc, curl and git installed then just run
+Make sure you have the fish shell installed (other deps will be resolved by the script) then just run
 ```bash
 cd $(mktemp -d) #To not pollute your filesystem
 curl https://raw.githubusercontent.com/willmil11/cleanai-c/refs/heads/main/install.fish -o install.fish #To download the script
