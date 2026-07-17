@@ -79,7 +79,7 @@ If your loss is not really decreasing try to increase your learningRate by a lit
 - 1.2.2: Fixed bug in cli parser where it would let the user continue (and then crash) if they did not specify --new nor --load. Also cleaned up install.fish slightly.
 - 1.2.1: Made the agc more loose for faster training.
 - 1.2.0: Fixed bugs for training correctness involving RoPE, config parsing and other things. Tho the current approach for RoPE could be made more efficient but that's for next version.
-- 1.1.7: Fixed numerical instability. Aka agc was added (credit to claude for this specific change)
+- 1.1.7: Fixed numerical instability. Aka agc was added
 - 1.1.6: Removed a few comments, I'm not even gonna bump up the last date that I worked on this because this update is so insignificant it barely even deserves to be mentioned here.
 - 1.1.5: Updated README.
 - 1.1.4: Fixed a single printf.
